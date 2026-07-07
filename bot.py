@@ -21,6 +21,7 @@ intents.guilds = True
 intents.reactions = True
 
 COGS = [
+    'cogs.stats',
     'cogs.tickets',
     'cogs.moderation',
     'cogs.giveaway',
