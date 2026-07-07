@@ -82,10 +82,10 @@ def fmt_num(n):
     return f"{sign}{n:.0f}" if n == int(n) else f"{sign}{n:.2f}"
 
 
-def fmt_playtime(seconds):
-    if seconds is None:
+def fmt_playtime(milliseconds):
+    if milliseconds is None:
         return "N/A"
-    seconds = int(seconds)
+    seconds = int(milliseconds) // 1000
     days = seconds // 86400
     hours = (seconds % 86400) // 3600
     minutes = (seconds % 3600) // 60
