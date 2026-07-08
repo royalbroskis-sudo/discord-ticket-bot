@@ -1,6 +1,7 @@
 # app.py – full file with payment log channel added
 
 import os
+import time
 from flask import Flask, render_template, redirect, request, session, Response, jsonify
 import requests
 from dotenv import load_dotenv
@@ -51,6 +52,59 @@ if db is not None:
         logger.error("❌ MongoDB test failed!")
 else:
     logger.error("❌ Could not connect to MongoDB at startup!")
+
+
+# ── Track which guilds the bot is actually a member of ──────────────────────
+# The OAuth "guilds" scope only tells us which servers the *user* manages —
+# it says nothing about whether the bot itself has been added. We fetch the
+# bot's own guild list (Bot token) and cache it briefly so we're not hitting
+# Discord on every page load.
+_bot_guild_ids_cache = {"ids": set(), "ts": 0}
+_BOT_GUILDS_CACHE_TTL = 60  # seconds
+
+
+def get_bot_guild_ids():
+    """Return the set of guild IDs the bot is currently a member of."""
+    now = time.time()
+    if _bot_guild_ids_cache["ids"] and (now - _bot_guild_ids_cache["ts"] < _BOT_GUILDS_CACHE_TTL):
+        return _bot_guild_ids_cache["ids"]
+
+    if not BOT_TOKEN:
+        return _bot_guild_ids_cache["ids"]
+
+    headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
+    ids = set()
+    after = None
+    try:
+        while True:
+            params = {"limit": 200}
+            if after:
+                params["after"] = after
+            resp = requests.get(
+                "https://discord.com/api/v10/users/@me/guilds",
+                headers=headers, params=params, timeout=10,
+            )
+            if not resp.ok:
+                break
+            page = resp.json()
+            if not page:
+                break
+            ids.update(int(g["id"]) for g in page)
+            if len(page) < 200:
+                break
+            after = page[-1]["id"]
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to fetch bot guild list: {e}")
+        if _bot_guild_ids_cache["ids"]:
+            return _bot_guild_ids_cache["ids"]  # serve stale cache over nothing
+
+    _bot_guild_ids_cache["ids"] = ids
+    _bot_guild_ids_cache["ts"] = now
+    return ids
+
+
+def bot_in_guild(guild_id) -> bool:
+    return int(guild_id) in get_bot_guild_ids()
 
 
 @app.route("/")
@@ -136,7 +190,17 @@ def callback():
 def dashboard():
     if "access_token" not in session:
         return redirect("/")
-    return render_template("dashboard.html", guilds=session.get("guilds", []))
+
+    bot_guild_ids = get_bot_guild_ids()
+    guilds = session.get("guilds", [])
+    for g in guilds:
+        g["bot_present"] = int(g["id"]) in bot_guild_ids
+
+    return render_template(
+        "dashboard.html",
+        guilds=guilds,
+        bot_missing=request.args.get("bot_missing"),
+    )
 
 
 @app.route("/logout")
@@ -232,6 +296,10 @@ def guild_dashboard(guild_id):
     user_guild_ids = [int(g["id"]) for g in session.get("guilds", [])]
     if guild_id not in user_guild_ids:
         abort(403)
+
+    # The bot itself must be in the server before there's anything to configure
+    if not bot_in_guild(guild_id):
+        return redirect(f"/dashboard?bot_missing={guild_id}")
 
     if db is None:
         return "<h1>Error: Database connection not available!</h1>", 500
@@ -553,6 +621,9 @@ def commands_dashboard(guild_id):
     if guild_id not in user_guild_ids:
         abort(403)
 
+    if not bot_in_guild(guild_id):
+        return redirect(f"/dashboard?bot_missing={guild_id}")
+
     if db is None:
         logger.error("❌ [CMD_PERMS] db is None — MongoDB never connected!")
         if request.method == "POST":
@@ -756,6 +827,9 @@ def builds_dashboard(guild_id):
     if guild_id not in user_guild_ids:
         abort(403)
 
+    if not bot_in_guild(guild_id):
+        return redirect(f"/dashboard?bot_missing={guild_id}")
+
     if db is None:
         return "<h1>Error: Database connection not available!</h1>", 500
 
@@ -862,6 +936,8 @@ def delete_build_order(guild_id):
     user_guild_ids = [int(g["id"]) for g in session.get("guilds", [])]
     if guild_id not in user_guild_ids:
         return jsonify({"success": False, "error": "Forbidden"}), 403
+    if not bot_in_guild(guild_id):
+        return jsonify({"success": False, "error": "Bot is not in this server"}), 403
     if db is None:
         return jsonify({"success": False, "error": "Database unavailable"}), 500
     guilds = session.get("guilds", [])
@@ -1020,6 +1096,8 @@ def tickets_dashboard(guild_id):
     user_guild_ids = [int(g["id"]) for g in session.get("guilds", [])]
     if guild_id not in user_guild_ids:
         abort(403)
+    if not bot_in_guild(guild_id):
+        return redirect(f"/dashboard?bot_missing={guild_id}")
     if db is None:
         return "<h1>Database unavailable</h1>", 500
 

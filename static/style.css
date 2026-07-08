@@ -564,6 +564,29 @@ button.danger:hover {
 }
 .manage-link:hover { color: #fff; }
 
+/* Server card variant for guilds the bot hasn't been added to yet */
+.server-card.not-added { cursor: default; opacity: 0.85; }
+.server-card.not-added .server-icon { filter: grayscale(0.6); opacity: 0.6; }
+.server-card.not-added:hover { transform: none; box-shadow: none; border-color: var(--border); }
+.server-card.not-added:hover::after { opacity: 0; }
+.add-link {
+    display: inline-flex; align-items: center; gap: 5px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+    transition: color var(--transition);
+    position: relative;
+    z-index: 1;
+}
+.add-link:hover { color: var(--accent-light); }
+.not-added-tag {
+    display: inline-block;
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-faint); margin-bottom: 10px;
+}
+
 /* ═══════════════════════════════════════════════
    DIVIDERS
 ═══════════════════════════════════════════════ */
