@@ -38,6 +38,7 @@ COGS = [
     'cogs.mcpay',
     'cogs.mc_link',        # per-user Minecraft account linking (/link, /unlink, /mc)
     'cogs.invites',
+    'cogs.embed_activity',  # /embed sender + /activity presence setter
 
 ]
 
