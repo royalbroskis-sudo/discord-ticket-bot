@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from db import get_bot_token, get_db, test_mongodb
 from bson.objectid import ObjectId
 from flask import abort
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 load_dotenv()
@@ -25,6 +25,13 @@ app.secret_key = flask_secret
 # Force Flask to use secure cookies for HTTPS (Railway)
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Keep users logged in across browser restarts until they explicitly log out.
+# Without this, Flask issues a browser-session-only cookie that gets wiped
+# whenever the browser fully closes, forcing a re-login even though the
+# Discord authorization itself is still valid.
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
 # Discord OAuth2 Config
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -84,6 +91,9 @@ def callback():
     if "access_token" not in tokens:
         return redirect("/")
 
+    # Make this a long-lived session (see PERMANENT_SESSION_LIFETIME above)
+    # instead of a browser-session-only cookie.
+    session.permanent = True
     session["access_token"] = tokens["access_token"]
 
     # Store which Discord user this is, so per-user features (like the MC
@@ -123,6 +133,12 @@ def dashboard():
     if "access_token" not in session:
         return redirect("/")
     return render_template("dashboard.html", guilds=session.get("guilds", []))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
 
 
 @app.route("/transcripts")

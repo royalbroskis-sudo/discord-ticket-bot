@@ -187,6 +187,21 @@ body::before {
     gap: 8px;
 }
 
+/* Logout — pinned to the bottom of the sidebar (sidebar is a flex column) */
+.nav-item.logout {
+    margin-top: auto;
+    color: #f87171;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    padding-top: 14px;
+    margin-left: 0;
+    margin-right: 0;
+}
+.nav-item.logout:hover {
+    color: #f87171;
+    background: var(--danger-tint);
+}
+
 /* ═══════════════════════════════════════════════
    CONTENT AREA
 ═══════════════════════════════════════════════ */

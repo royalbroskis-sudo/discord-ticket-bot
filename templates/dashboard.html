@@ -14,9 +14,17 @@
         }
         .picker-header p { color: var(--text-muted); font-size: 14px; }
         .grid { position: relative; z-index: 1; animation: fadeInUp 0.5s 0.06s var(--transition-slow) both; }
+        .logout-link {
+            position: absolute; top: 24px; right: 28px; z-index: 2;
+            color: var(--text-muted); text-decoration: none; font-size: 13px; font-weight: 600;
+            display: inline-flex; align-items: center; gap: 6px;
+            transition: color var(--transition);
+        }
+        .logout-link:hover { color: #f87171; }
     </style>
 </head>
 <body>
+    <a href="/logout" class="logout-link">🚪 Log Out</a>
     <div class="picker-header">
         <h1>Select a Server</h1>
         <p>Choose a server to configure autorole, moderation, tickets, and more.</p>
