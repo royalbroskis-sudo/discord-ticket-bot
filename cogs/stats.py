@@ -182,6 +182,8 @@ class Stats(commands.Cog):
 
     @app_commands.command(name="stats", description="View a player's DonutSMP stats.")
     @app_commands.describe(ign="Minecraft username to look up")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def stats_slash(self, interaction: discord.Interaction, ign: str):
         await interaction.response.defer()
         await self._send_stats(interaction.followup.send, ign)
