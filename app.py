@@ -55,11 +55,15 @@ else:
 
 @app.route("/")
 def index():
+    if "access_token" in session:
+        return redirect("/dashboard")
     return render_template("index.html", client_id=CLIENT_ID, redirect_uri=REDIRECT_URI)
 
 
 @app.route("/login")
 def login():
+    if "access_token" in session:
+        return redirect("/dashboard")
     return redirect(
         f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds"
     )
