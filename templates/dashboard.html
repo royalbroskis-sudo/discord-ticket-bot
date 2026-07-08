@@ -1,15 +1,26 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Servers</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <style>
-        body { display: block; height: auto; text-align: center; padding-top: 50px; }
-        h1 { color: var(--text-main); margin-bottom: 30px; }
+        body { display: block; height: auto; min-height: 100vh; overflow: auto; text-align: center; padding: 70px 24px; }
+        .picker-header { max-width: 560px; margin: 0 auto 40px; position: relative; z-index: 1; animation: fadeInUp 0.45s var(--transition-slow) both; }
+        .picker-header h1 {
+            font-size: 30px; font-weight: 800; letter-spacing: -0.03em;
+            color: var(--text-bright); margin-bottom: 8px;
+        }
+        .picker-header p { color: var(--text-muted); font-size: 14px; }
+        .grid { position: relative; z-index: 1; animation: fadeInUp 0.5s 0.06s var(--transition-slow) both; }
     </style>
 </head>
 <body>
-    <h1>Select a Server</h1>
+    <div class="picker-header">
+        <h1>Select a Server</h1>
+        <p>Choose a server to configure autorole, moderation, tickets, and more.</p>
+    </div>
     <div class="grid">
         {% for guild in guilds %}
             <div class="server-card">
@@ -19,7 +30,7 @@
                 <div class="server-icon">{{ guild.name[0] }}</div>
                 {% endif %}
                 <h3>{{ guild.name }}</h3>
-                <a href="/dashboard/{{ guild.id }}" class="manage-link">Manage Settings</a>
+                <a href="/dashboard/{{ guild.id }}" class="manage-link">Manage Settings →</a>
             </div>
         {% endfor %}
     </div>
