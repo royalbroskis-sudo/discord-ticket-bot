@@ -76,6 +76,32 @@ Rules:
 # Tool schema (OpenAI-compatible function-calling format)
 # ---------------------------------------------------------------------------
 
+EMBED_SCHEMA = {
+    "type": "object",
+    "description": "Optional rich embed to attach to the message. Provide content, embed, or both.",
+    "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "url": {"type": "string", "description": "Makes the title a clickable link"},
+        "color": {"type": "string", "description": "Hex color like #3498db"},
+        "footer": {"type": "string"},
+        "thumbnail_url": {"type": "string"},
+        "image_url": {"type": "string"},
+        "fields": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "value": {"type": "string"},
+                    "inline": {"type": "boolean"},
+                },
+                "required": ["name", "value"],
+            },
+        },
+    },
+}
+
 TOOLS = [
     {
         "type": "function",
@@ -111,7 +137,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "summarize_channel",
-            "description": "Fetch the most recent messages from a channel so you can summarize or analyze them.",
+            "description": "Fetch the most recent messages from a channel — including embed content (title/description/fields/footer), not just plain text — so you can summarize or analyze them.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -282,14 +308,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "send_message",
-            "description": "Post a message as the bot in a channel.",
+            "description": "Post a message as the bot in a channel. Supports plain text, a rich embed, or both.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "channel_id": {"type": "string"},
                     "content": {"type": "string"},
+                    "embed": EMBED_SCHEMA,
                 },
-                "required": ["channel_id", "content"],
+                "required": ["channel_id"],
             },
         },
     },
@@ -297,14 +324,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "dm_user",
-            "description": "Send a direct message to a user as the bot.",
+            "description": "Send a direct message to a user as the bot. Supports plain text, a rich embed, or both.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {"type": "string"},
                     "content": {"type": "string"},
+                    "embed": EMBED_SCHEMA,
                 },
-                "required": ["user_id", "content"],
+                "required": ["user_id"],
             },
         },
     },
@@ -637,9 +665,15 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
     if tool_name == "remove_role":
         return f"Remove role `{args.get('role_id')}` from user `{uid}`"
     if tool_name == "send_message":
-        return f"Send message to channel `{args.get('channel_id')}`: \"{(args.get('content') or '')[:80]}\""
+        text = (args.get("content") or "").strip()
+        embed_title = (args.get("embed") or {}).get("title")
+        label = f"\"{text[:80]}\"" if text else f"embed \"{embed_title}\"" if embed_title else "an embed"
+        return f"Send message to channel `{args.get('channel_id')}`: {label}"
     if tool_name == "dm_user":
-        return f"DM user `{uid}`: \"{(args.get('content') or '')[:80]}\""
+        text = (args.get("content") or "").strip()
+        embed_title = (args.get("embed") or {}).get("title")
+        label = f"\"{text[:80]}\"" if text else f"embed \"{embed_title}\"" if embed_title else "an embed"
+        return f"DM user `{uid}`: {label}"
     if tool_name == "create_channel":
         return f"Create channel `#{args.get('name')}`" + (f" under category `{args.get('parent_id')}`" if args.get("parent_id") else "")
     if tool_name == "rename_channel":
@@ -699,6 +733,44 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
         who = f" from user `{args.get('only_from_user_id')}`" if args.get("only_from_user_id") else ""
         return f"Bulk-delete up to {args.get('count')} recent messages{who} in channel `{args.get('channel_id')}`"
     return f"{tool_name}({args})"
+
+
+def _parse_embed(embed_args) -> dict | None:
+    """Turns the model's embed args (see EMBED_SCHEMA) into a Discord embed
+    object. Returns None if embed_args is empty/absent so callers can tell
+    'no embed' apart from 'empty embed'."""
+    if not embed_args:
+        return None
+    embed = {}
+    if embed_args.get("title"):
+        embed["title"] = str(embed_args["title"])[:256]
+    if embed_args.get("description"):
+        embed["description"] = str(embed_args["description"])[:4096]
+    if embed_args.get("url"):
+        embed["url"] = str(embed_args["url"])
+    if embed_args.get("color"):
+        c = str(embed_args["color"]).strip().lstrip("#")
+        try:
+            embed["color"] = int(c, 16) if not c.isdigit() else int(c)
+        except ValueError:
+            pass  # bad color string — just skip it rather than fail the whole send
+    if embed_args.get("footer"):
+        embed["footer"] = {"text": str(embed_args["footer"])[:2048]}
+    if embed_args.get("thumbnail_url"):
+        embed["thumbnail"] = {"url": str(embed_args["thumbnail_url"])}
+    if embed_args.get("image_url"):
+        embed["image"] = {"url": str(embed_args["image_url"])}
+    fields = embed_args.get("fields") or []
+    if fields:
+        embed["fields"] = [
+            {
+                "name": str(f.get("name", ""))[:256],
+                "value": str(f.get("value", ""))[:1024],
+                "inline": bool(f.get("inline", False)),
+            }
+            for f in fields[:25]
+        ]
+    return embed or None
 
 
 DISCORD_EPOCH_MS = 1420070400000  # 2015-01-01T00:00:00Z, per Discord's snowflake spec
@@ -770,10 +842,27 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
             if not r.ok:
                 return {"error": "Could not fetch messages — check the bot can view that channel."}
             msgs = r.json()
-            simplified = [
-                {"author": m.get("author", {}).get("username", "?"), "content": m.get("content", "")}
-                for m in reversed(msgs)
-            ]
+            simplified = []
+            for m in reversed(msgs):
+                entry = {"author": m.get("author", {}).get("username", "?"), "content": m.get("content", "")}
+                embeds = m.get("embeds") or []
+                if embeds:
+                    # Bots/webhooks often post info as embeds with little or no
+                    # plain `content` — without this, those messages looked
+                    # blank to the model even though they clearly weren't.
+                    entry["embeds"] = [
+                        {
+                            "title": (e.get("title") or "")[:200] or None,
+                            "description": (e.get("description") or "")[:500] or None,
+                            "fields": [
+                                {"name": f.get("name", "")[:100], "value": f.get("value", "")[:200]}
+                                for f in (e.get("fields") or [])[:10]
+                            ] or None,
+                            "footer": ((e.get("footer") or {}).get("text") or "")[:200] or None,
+                        }
+                        for e in embeds[:5]
+                    ]
+                simplified.append(entry)
             return {"messages": simplified}
 
         if tool_name == "list_warnings":
@@ -991,22 +1080,40 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
         elif tool_name == "send_message":
             channel_id = args.get("channel_id")
             content = (args.get("content") or "").strip()[:2000]
-            r = discord_api("POST", f"/channels/{channel_id}/messages", json={"content": content})
-            ok = r.ok
-            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
-            detail = f"channel #{channel_id}: {content[:80]}"
+            embed = _parse_embed(args.get("embed"))
+            if not content and not embed:
+                ok, error = False, "Message needs content and/or an embed — both were empty."
+            else:
+                payload = {}
+                if content:
+                    payload["content"] = content
+                if embed:
+                    payload["embeds"] = [embed]
+                r = discord_api("POST", f"/channels/{channel_id}/messages", json=payload)
+                ok = r.ok
+                error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+                detail = f"channel #{channel_id}: {(content or (embed or {}).get('title') or '(embed)')[:80]}"
 
         elif tool_name == "dm_user":
             content = (args.get("content") or "").strip()[:2000]
-            dm = discord_api("POST", "/users/@me/channels", json={"recipient_id": user_id})
-            if not dm.ok:
-                ok, error = False, f"HTTP {dm.status_code}: {dm.text[:200]}"
+            embed = _parse_embed(args.get("embed"))
+            if not content and not embed:
+                ok, error = False, "Message needs content and/or an embed — both were empty."
             else:
-                dm_channel_id = dm.json()["id"]
-                r = discord_api("POST", f"/channels/{dm_channel_id}/messages", json={"content": content})
-                ok = r.ok
-                error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
-            detail = content[:80]
+                dm = discord_api("POST", "/users/@me/channels", json={"recipient_id": user_id})
+                if not dm.ok:
+                    ok, error = False, f"HTTP {dm.status_code}: {dm.text[:200]}"
+                else:
+                    dm_channel_id = dm.json()["id"]
+                    payload = {}
+                    if content:
+                        payload["content"] = content
+                    if embed:
+                        payload["embeds"] = [embed]
+                    r = discord_api("POST", f"/channels/{dm_channel_id}/messages", json=payload)
+                    ok = r.ok
+                    error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+                detail = (content or (embed or {}).get("title") or "(embed)")[:80]
 
         elif tool_name == "create_channel":
             name = (args.get("name") or "").strip()[:100]
