@@ -15,9 +15,13 @@ Two modes, based on the message author's roles:
     does it, no dashboard confirm step, because the role check already is
     the authorization.
 
-Uses the same free GROQ_API_KEY as everything else. Every auto-executed
-action is logged to the same `console_actions` collection the dashboard
-console writes to, so it shows up in Recent Console Actions there too.
+Uses the same free GEMINI_API_KEY as everything else in ai_agent.py.
+Every auto-executed action is logged to the same `console_actions`
+collection the dashboard console writes to, so it shows up in Recent
+Console Actions there too.
+
+Tone comes from personality.py, shared with ai_agent.py — edit that
+file to change how the bot talks, not this one.
 """
 
 import discord
@@ -27,19 +31,22 @@ from datetime import datetime, timezone
 import ai_agent
 from app import _discord_api
 from cogs.config import get_guild_config, member_has_role_id
+from personality import PERSONALITY
 
 MAX_HISTORY_TURNS = 6       # user+assistant pairs kept per channel
 COOLDOWN_SECONDS = 4        # per-user, to avoid spam/rate-limit issues
 DISCORD_CHUNK = 1900        # stay under Discord's 2000 char message limit
 
-SYSTEM_PROMPT_TEMPLATE = (
-    "You are {bot_name}, a friendly, casual Discord bot chatting in the server \"{guild_name}\". "
-    "Keep replies conversational and fairly short (a few sentences, unless the person clearly "
-    "wants something longer or more detailed). Use a relaxed, natural tone — not corporate or "
-    "overly formal. You are NOT a moderation tool in this conversation and cannot mute, kick, "
-    "ban, or change anything on the server — if someone asks you to do that, tell them to use "
-    "the actual mod commands or the dashboard instead. Never claim to have taken an action you "
-    "didn't actually take."
+SYSTEM_PROMPT_TEMPLATE = PERSONALITY + "\n\n" + (
+    "The above is tone only — the rules below always win if they ever pull in "
+    "different directions.\n\n"
+    "You are {bot_name}, chatting in the Discord server \"{guild_name}\". Keep "
+    "replies conversational and fairly short (a few sentences, unless the "
+    "person clearly wants something longer or more detailed). You are NOT a "
+    "moderation tool in this conversation and cannot mute, kick, ban, or "
+    "change anything on the server — if someone asks you to do that, tell "
+    "them to use the actual mod commands or the dashboard instead. Never "
+    "claim to have taken an action you didn't actually take."
 )
 
 
@@ -121,7 +128,7 @@ class AIChat(commands.Cog):
         if not is_mentioned and not is_reply_to_bot:
             return
 
-        if not ai_agent.GROQ_API_KEY:
+        if not ai_agent.GEMINI_API_KEY:
             return  # feature not configured — stay silent rather than error in chat
 
         if self._on_cooldown(message.author.id):
@@ -150,6 +157,7 @@ class AIChat(commands.Cog):
                             self.bot.db,
                             auto_execute=True,
                             log_action=self._log_action(message.guild.id, message.author),
+                            actor_name=str(message.author),
                         ),
                     )
                     reply = result["reply"]
@@ -164,7 +172,17 @@ class AIChat(commands.Cog):
                     )
                     reply = await self.bot.loop.run_in_executor(None, ai_agent.simple_chat, messages)
         except Exception as e:
-            print(f"❌ AIChat: Groq call failed: {e}")
+            # Previously this just printed to console and returned, so a
+            # Gemini rate-limit/timeout/etc looked to the user like the bot
+            # ignored them entirely with no way to tell what happened.
+            print(f"❌ AIChat: Gemini call failed: {e}")
+            try:
+                await message.reply(
+                    "⚠️ Something went wrong talking to the AI just now — try again in a few seconds.",
+                    mention_author=False,
+                )
+            except discord.HTTPException:
+                pass
             return
 
         history.append({"role": "user", "content": f"{message.author.display_name}: {content}"})

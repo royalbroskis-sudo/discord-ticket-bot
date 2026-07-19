@@ -1,17 +1,18 @@
 """
 ai_agent.py — Natural-language admin agent for the dashboard.
 
-Uses Groq's free, OpenAI-compatible chat-completions API (tool calling
-included) so no extra SDK is needed beyond `requests`, which app.py
-already depends on.
+Talks to Gemini's OpenAI-compatible chat-completions endpoint (tool
+calling included) so no extra SDK is needed beyond `requests`, which
+app.py already depends on.
 
 How it fits together:
   - TOOLS / TOOL_FUNCTIONS define what the model can do. Every tool maps
     to a real Discord REST call made with the bot token, the same way
     app.py's existing `bot_console` form handlers already work.
   - Read-only tools (lookup_user, list_channels, list_roles,
-    summarize_channel, list_warnings) execute immediately and their
-    result is fed back to the model so it can keep reasoning.
+    summarize_channel, list_warnings, server_stats, member_insights)
+    execute immediately and their result is fed back to the model so it
+    can keep reasoning.
   - Destructive tools (anything that changes the server) are NOT
     executed here. run_agent_turn() stops and hands the proposed call
     back to app.py, which shows the user a Confirm/Cancel step. Only
@@ -21,23 +22,32 @@ app.py is expected to provide:
   - a `discord_api(method, path, reason=None, **kwargs)` callable
     (this is just _discord_api from app.py, passed in to avoid a
     circular import)
-  - GROQ_API_KEY from the environment
+  - GEMINI_API_KEY from the environment
+
+Tone is defined once in personality.py and prepended to SYSTEM_PROMPT
+below — edit that file to change how the bot talks, not this one.
 """
 
 import os
 import json
 import logging
+import time
 import requests
+
+from personality import PERSONALITY
 
 logger = logging.getLogger(__name__)
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-MAX_TOOL_ITERATIONS = 6  # safety cap so a confused model can't loop forever
+MAX_TOOL_ITERATIONS = int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "15"))  # safety cap so a confused model can't loop forever
 
-SYSTEM_PROMPT = """You are the admin assistant for a Discord server's web dashboard.
+SYSTEM_PROMPT = PERSONALITY + "\n\n" + """The above is tone only — everything below is operational and always wins
+if the two ever pull in different directions.
+
+You are the admin assistant for a Discord server's web dashboard.
 Staff type natural-language requests and you either answer directly, call a
 read-only tool to look something up, or propose a moderation/action tool call.
 
@@ -52,10 +62,18 @@ Rules:
   they were already given to you in this conversation — don't assume IDs.
 - Destructive tools are never executed by you directly; proposing the call is
   enough, the dashboard will ask the human to confirm.
+- When a request involves the same action on multiple targets (e.g. warning
+  several users, creating several channels), include all of those tool calls
+  in the same response instead of spreading them one-per-turn — you have a
+  limited number of turns to finish a request.
+- When confirming an action you just took (or several), state plainly and
+  accurately what was done — target, action, reason if any. Personality can
+  flavor the wording around it, but never at the cost of clarity: someone
+  reading only that sentence should know exactly what happened on the server.
 """
 
 # ---------------------------------------------------------------------------
-# Tool schema (OpenAI-compatible function-calling format, which Groq supports)
+# Tool schema (OpenAI-compatible function-calling format)
 # ---------------------------------------------------------------------------
 
 TOOLS = [
@@ -114,6 +132,48 @@ TOOLS = [
                 "properties": {"user_id": {"type": "string"}},
                 "required": ["user_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "server_stats",
+            "description": "Get overall server statistics: member count, channel count/breakdown by type, role count, boost tier and boost count, and server creation date.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "member_insights",
+            "description": "Get detailed info on a single member: join date, account creation date, current roles, timeout status, and warning count.",
+            "parameters": {
+                "type": "object",
+                "properties": {"user_id": {"type": "string"}},
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_audit_log",
+            "description": "Get recent server audit log entries (who did what — bans, kicks, channel/role changes, etc).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "How many entries to fetch, default 10, max 50"},
+                    "user_id": {"type": "string", "description": "Optional — filter to actions performed by this user"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_invites",
+            "description": "List active invite links for the server, with their channel, uses, and expiry.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     # ---- destructive: proposed only, executed after human confirms ----
@@ -248,9 +308,314 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_channel",
+            "description": "Create a new text channel in this guild.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "parent_id": {"type": "string", "description": "Category channel ID to nest the new channel under"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rename_channel",
+            "description": "Rename an existing channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+                "required": ["channel_id", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_channel",
+            "description": "Delete a channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {"channel_id": {"type": "string"}},
+                "required": ["channel_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_role",
+            "description": "Create a new role in this guild.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "color": {"type": "integer", "description": "Decimal RGB color value, e.g. 0x3498db"},
+                    "hoist": {"type": "boolean", "description": "Display role members separately in the member list"},
+                    "mentionable": {"type": "boolean"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_role",
+            "description": "Edit an existing role's name, color, hoist, or mentionable settings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "role_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "color": {"type": "integer"},
+                    "hoist": {"type": "boolean"},
+                    "mentionable": {"type": "boolean"},
+                },
+                "required": ["role_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_role",
+            "description": "Delete a role from this guild.",
+            "parameters": {
+                "type": "object",
+                "properties": {"role_id": {"type": "string"}},
+                "required": ["role_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_message",
+            "description": "Delete a specific message from a channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["channel_id", "message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pin_message",
+            "description": "Pin a specific message in a channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                },
+                "required": ["channel_id", "message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unpin_message",
+            "description": "Unpin a specific message in a channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                },
+                "required": ["channel_id", "message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "warn_member",
+            "description": "Issue a moderation warning to a member, stored in the warnings collection.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["user_id", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_warnings",
+            "description": "Clear all stored warnings for a member.",
+            "parameters": {
+                "type": "object",
+                "properties": {"user_id": {"type": "string"}},
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_nickname",
+            "description": "Change a member's server nickname. Pass an empty string to reset to their username.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "nickname": {"type": "string"},
+                },
+                "required": ["user_id", "nickname"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_channel_settings",
+            "description": "Edit a channel's topic, slowmode, NSFW flag, or category (parent).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "slowmode_seconds": {"type": "integer", "description": "Rate limit per user, 0-21600, 0 disables it"},
+                    "nsfw": {"type": "boolean"},
+                    "parent_id": {"type": "string", "description": "Category channel ID to move this channel under"},
+                },
+                "required": ["channel_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_voice_state",
+            "description": "Move a member to a different voice channel, or server-mute/deafen them. Any field left unset is unchanged.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "voice_channel_id": {"type": "string", "description": "Channel to move them to, or omit to leave unchanged"},
+                    "mute": {"type": "boolean"},
+                    "deafen": {"type": "boolean"},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_invite",
+            "description": "Create an invite link for a channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "max_age_seconds": {"type": "integer", "description": "0 = never expires. Default 86400 (24h)."},
+                    "max_uses": {"type": "integer", "description": "0 = unlimited. Default 0."},
+                    "temporary": {"type": "boolean", "description": "Grants temporary membership (kicked on disconnect unless a role is given)"},
+                },
+                "required": ["channel_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_invite",
+            "description": "Revoke an invite by its code (the part after discord.gg/).",
+            "parameters": {
+                "type": "object",
+                "properties": {"invite_code": {"type": "string"}},
+                "required": ["invite_code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_emoji",
+            "description": "Delete a custom server emoji by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {"emoji_id": {"type": "string"}},
+                "required": ["emoji_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "prune_members",
+            "description": "Kick all members who have been inactive (no roles, not seen) for at least the given number of days. Returns how many were removed. Use with caution — this is bulk and irreversible.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "description": "Inactivity threshold in days, minimum 1"},
+                },
+                "required": ["days"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_server_settings",
+            "description": "Edit server-wide settings: name, description, or verification level.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "verification_level": {
+                        "type": "integer",
+                        "description": "0=none 1=low 2=medium 3=high 4=very high",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "purge_messages",
+            "description": "Bulk-delete recent messages in a channel (only messages under 14 days old, Discord limitation). Optionally restrict to one user's messages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "count": {"type": "integer", "description": "How many recent messages to scan/delete, 2-100"},
+                    "only_from_user_id": {"type": "string", "description": "Optional — only delete messages from this user"},
+                },
+                "required": ["channel_id", "count"],
+            },
+        },
+    },
 ]
 
-READ_ONLY_TOOLS = {"lookup_user", "list_channels", "list_roles", "summarize_channel", "list_warnings"}
+READ_ONLY_TOOLS = {
+    "lookup_user", "list_channels", "list_roles", "summarize_channel", "list_warnings",
+    "server_stats", "member_insights", "get_audit_log", "list_invites",
+}
 DESTRUCTIVE_TOOLS = {t["function"]["name"] for t in TOOLS} - READ_ONLY_TOOLS
 
 
@@ -275,7 +640,79 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
         return f"Send message to channel `{args.get('channel_id')}`: \"{(args.get('content') or '')[:80]}\""
     if tool_name == "dm_user":
         return f"DM user `{uid}`: \"{(args.get('content') or '')[:80]}\""
+    if tool_name == "create_channel":
+        return f"Create channel `#{args.get('name')}`" + (f" under category `{args.get('parent_id')}`" if args.get("parent_id") else "")
+    if tool_name == "rename_channel":
+        return f"Rename channel `{args.get('channel_id')}` to `#{args.get('name')}`"
+    if tool_name == "delete_channel":
+        return f"Delete channel `{args.get('channel_id')}`"
+    if tool_name == "create_role":
+        return f"Create role `{args.get('name')}`"
+    if tool_name == "edit_role":
+        return f"Edit role `{args.get('role_id')}`" + (f" — rename to `{args.get('name')}`" if args.get("name") else "")
+    if tool_name == "delete_role":
+        return f"Delete role `{args.get('role_id')}`"
+    if tool_name == "delete_message":
+        return f"Delete message `{args.get('message_id')}` in channel `{args.get('channel_id')}`" + (f" — reason: {args.get('reason')}" if args.get("reason") else "")
+    if tool_name == "pin_message":
+        return f"Pin message `{args.get('message_id')}` in channel `{args.get('channel_id')}`"
+    if tool_name == "unpin_message":
+        return f"Unpin message `{args.get('message_id')}` in channel `{args.get('channel_id')}`"
+    if tool_name == "warn_member":
+        return f"Warn user `{uid}` — reason: {args.get('reason') or 'none given'}"
+    if tool_name == "clear_warnings":
+        return f"Clear all warnings for user `{uid}`"
+    if tool_name == "set_nickname":
+        nick = args.get("nickname")
+        return f"Reset nickname for user `{uid}`" if not nick else f"Set nickname for user `{uid}` to `{nick}`"
+    if tool_name == "edit_channel_settings":
+        parts = []
+        if args.get("topic") is not None:
+            parts.append(f"topic to \"{args['topic'][:40]}\"")
+        if args.get("slowmode_seconds") is not None:
+            parts.append(f"slowmode to {args['slowmode_seconds']}s")
+        if args.get("nsfw") is not None:
+            parts.append(f"NSFW to {args['nsfw']}")
+        if args.get("parent_id") is not None:
+            parts.append(f"category to `{args['parent_id']}`")
+        return f"Edit channel `{args.get('channel_id')}` — set " + ", ".join(parts) if parts else f"Edit channel `{args.get('channel_id')}`"
+    if tool_name == "set_voice_state":
+        bits = []
+        if args.get("voice_channel_id"):
+            bits.append(f"move to voice channel `{args['voice_channel_id']}`")
+        if args.get("mute") is not None:
+            bits.append(f"mute={args['mute']}")
+        if args.get("deafen") is not None:
+            bits.append(f"deafen={args['deafen']}")
+        return f"User `{uid}`: " + ", ".join(bits) if bits else f"Edit voice state for user `{uid}`"
+    if tool_name == "create_invite":
+        return f"Create invite link for channel `{args.get('channel_id')}`"
+    if tool_name == "delete_invite":
+        return f"Revoke invite `{args.get('invite_code')}`"
+    if tool_name == "delete_emoji":
+        return f"Delete emoji `{args.get('emoji_id')}`"
+    if tool_name == "prune_members":
+        return f"Kick all members inactive for {args.get('days')}+ days"
+    if tool_name == "edit_server_settings":
+        return f"Edit server settings: {args}"
+    if tool_name == "purge_messages":
+        who = f" from user `{args.get('only_from_user_id')}`" if args.get("only_from_user_id") else ""
+        return f"Bulk-delete up to {args.get('count')} recent messages{who} in channel `{args.get('channel_id')}`"
     return f"{tool_name}({args})"
+
+
+DISCORD_EPOCH_MS = 1420070400000  # 2015-01-01T00:00:00Z, per Discord's snowflake spec
+
+
+def _snowflake_to_iso(snowflake) -> str | None:
+    """Decode the timestamp embedded in a Discord snowflake ID (used for
+    account/server creation dates — Discord doesn't return these directly)."""
+    from datetime import datetime, timezone
+    try:
+        ms = (int(snowflake) >> 22) + DISCORD_EPOCH_MS
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +783,102 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
             doc = db["warnings"].find_one({"guild_id": guild_id, "user_id": int(user_id)})
             return {"warnings": doc.get("warnings", []) if doc else []}
 
+        if tool_name == "server_stats":
+            r = discord_api("GET", f"/guilds/{guild_id}", params={"with_counts": "true"})
+            if not r.ok:
+                return {"error": "Could not fetch guild info"}
+            guild = r.json()
+
+            rc = discord_api("GET", f"/guilds/{guild_id}/channels")
+            channel_breakdown = {}
+            if rc.ok:
+                # 0=text 2=voice 4=category 5=announcement 13=stage 15=forum
+                type_names = {0: "text", 2: "voice", 4: "category", 5: "announcement", 13: "stage", 15: "forum"}
+                for c in rc.json():
+                    label = type_names.get(c.get("type"), f"type_{c.get('type')}")
+                    channel_breakdown[label] = channel_breakdown.get(label, 0) + 1
+
+            rr = discord_api("GET", f"/guilds/{guild_id}/roles")
+            role_count = len(rr.json()) if rr.ok else None
+
+            return {
+                "name": guild.get("name"),
+                "member_count": guild.get("approximate_member_count"),
+                "online_count": guild.get("approximate_presence_count"),
+                "channel_count": sum(channel_breakdown.values()) if channel_breakdown else None,
+                "channel_breakdown": channel_breakdown,
+                "role_count": role_count,
+                "boost_tier": guild.get("premium_tier"),
+                "boost_count": guild.get("premium_subscription_count"),
+                "created_at": _snowflake_to_iso(guild.get("id")),
+            }
+
+        if tool_name == "member_insights":
+            user_id = args.get("user_id")
+            r = discord_api("GET", f"/guilds/{guild_id}/members/{user_id}")
+            if not r.ok:
+                return {"error": f"Could not fetch member — HTTP {r.status_code}"}
+            m = r.json()
+            user = m.get("user", {})
+
+            warning_count = 0
+            if db is not None:
+                doc = db["warnings"].find_one({"guild_id": guild_id, "user_id": int(user_id)})
+                warning_count = len(doc.get("warnings", [])) if doc else 0
+
+            return {
+                "id": user.get("id"),
+                "username": user.get("username"),
+                "display_name": m.get("nick") or user.get("global_name") or user.get("username"),
+                "joined_at": m.get("joined_at"),
+                "account_created_at": _snowflake_to_iso(user.get("id")),
+                "roles": m.get("roles", []),
+                "timed_out_until": m.get("communication_disabled_until"),
+                "warning_count": warning_count,
+            }
+
+        if tool_name == "get_audit_log":
+            limit = min(int(args.get("limit") or 10), 50)
+            params = {"limit": limit}
+            if args.get("user_id"):
+                params["user_id"] = str(args["user_id"])
+            r = discord_api("GET", f"/guilds/{guild_id}/audit-log", params=params)
+            if not r.ok:
+                return {"error": f"Could not fetch audit log — HTTP {r.status_code}"}
+            entries = r.json().get("audit_log_entries", [])
+            return {
+                "entries": [
+                    {
+                        "id": e.get("id"),
+                        "action_type": e.get("action_type"),
+                        "user_id": e.get("user_id"),
+                        "target_id": e.get("target_id"),
+                        "reason": e.get("reason"),
+                        "created_at": _snowflake_to_iso(e.get("id")),
+                    }
+                    for e in entries
+                ]
+            }
+
+        if tool_name == "list_invites":
+            r = discord_api("GET", f"/guilds/{guild_id}/invites")
+            if not r.ok:
+                return {"error": f"Could not fetch invites — HTTP {r.status_code}"}
+            return {
+                "invites": [
+                    {
+                        "code": i.get("code"),
+                        "channel_id": (i.get("channel") or {}).get("id"),
+                        "channel_name": (i.get("channel") or {}).get("name"),
+                        "uses": i.get("uses"),
+                        "max_uses": i.get("max_uses"),
+                        "max_age_seconds": i.get("max_age"),
+                        "created_by": (i.get("inviter") or {}).get("username"),
+                    }
+                    for i in r.json()
+                ]
+            }
+
     except Exception as e:
         logger.error(f"Agent read-only tool '{tool_name}' failed: {e}")
         return {"error": str(e)[:300]}
@@ -354,48 +887,52 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
 
 
 # ---------------------------------------------------------------------------
-# Groq call
+# Gemini call
 # ---------------------------------------------------------------------------
 
-def _call_groq(messages):
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY environment variable is not set.")
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "tools": TOOLS,
-        "tool_choice": "auto",
-        "temperature": 0.3,
-    }
-    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
+def _post_chat_completion(url, api_key, model, messages, tools=None, temperature=0.3, max_tokens=None):
+    """One HTTP call to Gemini's OpenAI-compatible chat-completions endpoint."""
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model, "messages": messages, "temperature": temperature}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Could not reach {url}: {e}") from e
+    if not resp.ok:
+        # Quota errors, deprecated/retired model IDs, bad key, etc. all land
+        # here — make them legible instead of a bare "500 Server Error"
+        # from raise_for_status()
+        raise RuntimeError(f"{url} returned {resp.status_code}: {resp.text[:300]}")
     return resp.json()
+
+
+def _call_llm(messages, tools=None, temperature=0.3, max_tokens=None):
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
+    return _post_chat_completion(GEMINI_API_URL, GEMINI_API_KEY, GEMINI_MODEL, messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
 
 
 def simple_chat(messages: list, temperature: float = 0.7, max_tokens: int = 600) -> str:
     """Plain conversational completion — no tools. Used by cogs/ai_chat.py for
     @mention / reply-to-bot conversations in Discord itself (not the dashboard
     agent, which uses run_agent_turn below)."""
-    if not GROQ_API_KEY:
-        raise RuntimeError("GROQ_API_KEY environment variable is not set.")
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    data = _call_llm(messages, temperature=temperature, max_tokens=max_tokens)
     return data["choices"][0]["message"]["content"] or "..."
 
 
-def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api):
+def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api, db=None, actor_name: str = "AI"):
     """Actually performs a destructive action via the Discord REST API.
     Shared by app.py's dashboard confirm-execute route and the trusted-staff
-    auto-execute path used from Discord chat (cogs/ai_chat.py)."""
+    auto-execute path used from Discord chat (cogs/ai_chat.py).
+
+    `db` is only needed for the warning tools (they write to the `warnings`
+    collection directly, same shape list_warnings reads). `actor_name` is
+    recorded as the "mod" on new warning entries."""
     from datetime import datetime, timedelta  # local import to avoid a hard dep for read-only-only callers
 
     user_id = str(args.get("user_id", "") or "")
@@ -471,6 +1008,233 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
             detail = content[:80]
 
+        elif tool_name == "create_channel":
+            name = (args.get("name") or "").strip()[:100]
+            payload = {"name": name, "type": 0}
+            if args.get("topic"):
+                payload["topic"] = str(args["topic"])[:1024]
+            if args.get("parent_id"):
+                payload["parent_id"] = str(args["parent_id"])
+            r = discord_api("POST", f"/guilds/{guild_id}/channels", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"#{name}" if ok else ""
+
+        elif tool_name == "rename_channel":
+            channel_id = args.get("channel_id")
+            name = (args.get("name") or "").strip()[:100]
+            r = discord_api("PATCH", f"/channels/{channel_id}", reason=reason, json={"name": name})
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"channel {channel_id} -> #{name}"
+
+        elif tool_name == "delete_channel":
+            channel_id = args.get("channel_id")
+            r = discord_api("DELETE", f"/channels/{channel_id}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"channel {channel_id}"
+
+        elif tool_name == "create_role":
+            payload = {"name": (args.get("name") or "new role").strip()[:100]}
+            if args.get("color") is not None:
+                payload["color"] = int(args["color"])
+            if args.get("hoist") is not None:
+                payload["hoist"] = bool(args["hoist"])
+            if args.get("mentionable") is not None:
+                payload["mentionable"] = bool(args["mentionable"])
+            r = discord_api("POST", f"/guilds/{guild_id}/roles", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = payload["name"] if ok else ""
+
+        elif tool_name == "edit_role":
+            role_id = args.get("role_id")
+            payload = {}
+            if args.get("name") is not None:
+                payload["name"] = str(args["name"]).strip()[:100]
+            if args.get("color") is not None:
+                payload["color"] = int(args["color"])
+            if args.get("hoist") is not None:
+                payload["hoist"] = bool(args["hoist"])
+            if args.get("mentionable") is not None:
+                payload["mentionable"] = bool(args["mentionable"])
+            r = discord_api("PATCH", f"/guilds/{guild_id}/roles/{role_id}", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"role {role_id}"
+
+        elif tool_name == "delete_role":
+            role_id = args.get("role_id")
+            r = discord_api("DELETE", f"/guilds/{guild_id}/roles/{role_id}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"role {role_id}"
+
+        elif tool_name == "delete_message":
+            channel_id = args.get("channel_id")
+            message_id = args.get("message_id")
+            r = discord_api("DELETE", f"/channels/{channel_id}/messages/{message_id}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"message {message_id} in #{channel_id}"
+
+        elif tool_name == "pin_message":
+            channel_id = args.get("channel_id")
+            message_id = args.get("message_id")
+            r = discord_api("PUT", f"/channels/{channel_id}/pins/{message_id}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"message {message_id} in #{channel_id}"
+
+        elif tool_name == "unpin_message":
+            channel_id = args.get("channel_id")
+            message_id = args.get("message_id")
+            r = discord_api("DELETE", f"/channels/{channel_id}/pins/{message_id}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"message {message_id} in #{channel_id}"
+
+        elif tool_name == "warn_member":
+            if db is None:
+                ok, error = False, "Database unavailable"
+            else:
+                entry = {
+                    "reason": reason,
+                    "mod": actor_name,
+                    "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                }
+                db["warnings"].update_one(
+                    {"guild_id": guild_id, "user_id": int(user_id)},
+                    {"$push": {"warnings": entry}},
+                    upsert=True,
+                )
+                ok = True
+                detail = reason
+
+        elif tool_name == "clear_warnings":
+            if db is None:
+                ok, error = False, "Database unavailable"
+            else:
+                db["warnings"].update_one(
+                    {"guild_id": guild_id, "user_id": int(user_id)},
+                    {"$set": {"warnings": []}},
+                    upsert=True,
+                )
+                ok = True
+                detail = "all warnings cleared"
+
+        elif tool_name == "set_nickname":
+            nick = args.get("nickname") or None  # empty string -> None resets to username
+            r = discord_api("PATCH", f"/guilds/{guild_id}/members/{user_id}", reason=reason, json={"nick": nick})
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = nick or "(reset)"
+
+        elif tool_name == "edit_channel_settings":
+            channel_id = args.get("channel_id")
+            payload = {}
+            if args.get("topic") is not None:
+                payload["topic"] = str(args["topic"])[:1024]
+            if args.get("slowmode_seconds") is not None:
+                payload["rate_limit_per_user"] = max(0, min(int(args["slowmode_seconds"]), 21600))
+            if args.get("nsfw") is not None:
+                payload["nsfw"] = bool(args["nsfw"])
+            if args.get("parent_id") is not None:
+                payload["parent_id"] = str(args["parent_id"])
+            r = discord_api("PATCH", f"/channels/{channel_id}", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"channel {channel_id}"
+
+        elif tool_name == "set_voice_state":
+            payload = {}
+            if args.get("voice_channel_id") is not None:
+                payload["channel_id"] = str(args["voice_channel_id"])
+            if args.get("mute") is not None:
+                payload["mute"] = bool(args["mute"])
+            if args.get("deafen") is not None:
+                payload["deaf"] = bool(args["deafen"])
+            r = discord_api("PATCH", f"/guilds/{guild_id}/members/{user_id}", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"user {user_id}"
+
+        elif tool_name == "create_invite":
+            channel_id = args.get("channel_id")
+            payload = {
+                "max_age": int(args.get("max_age_seconds", 86400)),
+                "max_uses": int(args.get("max_uses", 0)),
+                "temporary": bool(args.get("temporary", False)),
+            }
+            r = discord_api("POST", f"/channels/{channel_id}/invites", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"discord.gg/{r.json().get('code')}" if ok else ""
+
+        elif tool_name == "delete_invite":
+            code = args.get("invite_code")
+            r = discord_api("DELETE", f"/invites/{code}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = code
+
+        elif tool_name == "delete_emoji":
+            emoji_id = args.get("emoji_id")
+            r = discord_api("DELETE", f"/guilds/{guild_id}/emojis/{emoji_id}", reason=reason)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"emoji {emoji_id}"
+
+        elif tool_name == "prune_members":
+            days = max(1, int(args.get("days") or 7))
+            r = discord_api("POST", f"/guilds/{guild_id}/prune", reason=reason, json={"days": days, "compute_prune_count": True})
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = f"{r.json().get('pruned')} member(s) removed" if ok else ""
+
+        elif tool_name == "edit_server_settings":
+            payload = {k: v for k, v in {
+                "name": args.get("name"),
+                "description": args.get("description"),
+                "verification_level": args.get("verification_level"),
+            }.items() if v is not None}
+            r = discord_api("PATCH", f"/guilds/{guild_id}", reason=reason, json=payload)
+            ok = r.ok
+            error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+            detail = ", ".join(f"{k}={v}" for k, v in payload.items())
+
+        elif tool_name == "purge_messages":
+            channel_id = args.get("channel_id")
+            count = max(2, min(int(args.get("count") or 2), 100))
+            only_from = args.get("only_from_user_id")
+            # Discord's bulk-delete endpoint needs message IDs up front, so
+            # fetch recent messages first, optionally filter by author, then
+            # bulk-delete. Bulk delete only works on messages <14 days old —
+            # anything older gets skipped rather than failing the whole call.
+            rl = discord_api("GET", f"/channels/{channel_id}/messages", params={"limit": count})
+            if not rl.ok:
+                ok, error = False, f"HTTP {rl.status_code}: {rl.text[:200]}"
+            else:
+                msgs = rl.json()
+                if only_from:
+                    msgs = [m for m in msgs if m.get("author", {}).get("id") == str(only_from)]
+                cutoff_ms = 14 * 24 * 60 * 60 * 1000
+                now_ms = int(time.time() * 1000)
+                ids = [m["id"] for m in msgs if now_ms - ((int(m["id"]) >> 22) + DISCORD_EPOCH_MS) < cutoff_ms]
+                if not ids:
+                    ok, error = False, "No eligible messages found (either none matched, or all were older than 14 days)"
+                elif len(ids) == 1:
+                    rd = discord_api("DELETE", f"/channels/{channel_id}/messages/{ids[0]}", reason=reason)
+                    ok = rd.ok
+                    error = None if ok else f"HTTP {rd.status_code}: {rd.text[:200]}"
+                    detail = "1 message deleted"
+                else:
+                    rd = discord_api("POST", f"/channels/{channel_id}/messages/bulk-delete", reason=reason, json={"messages": ids})
+                    ok = rd.ok
+                    error = None if ok else f"HTTP {rd.status_code}: {rd.text[:200]}"
+                    detail = f"{len(ids)} message(s) deleted"
+
         else:
             error = "Unknown action."
 
@@ -489,9 +1253,10 @@ def run_agent_turn(
     db,
     auto_execute: bool = False,
     log_action=None,
+    actor_name: str = "AI",
 ):
     """
-    Runs one user turn to completion: repeatedly calls Groq, executing any
+    Runs one user turn to completion: repeatedly calls Gemini, executing any
     read-only tool calls automatically.
 
     - auto_execute=False (default; used by any confirm-first caller):
@@ -503,6 +1268,9 @@ def run_agent_turn(
       the model, and the loop continues — no separate confirmation step.
       If log_action(tool_name, args, ok, error, detail) is given, it's
       called after each auto-executed action for audit logging.
+      `actor_name` is recorded as the "mod" on any warn_member entries
+      written during this turn (defaults to "AI" for the confirm-first
+      dashboard path).
 
     Returns:
       {
@@ -514,10 +1282,25 @@ def run_agent_turn(
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
         {"role": "user", "content": user_message}
     ]
+    completed_log = []  # human-readable record of auto-executed actions this
+                         # turn, so a maxed-out loop can tell the user what
+                         # actually happened instead of just "I gave up"
 
     for _ in range(MAX_TOOL_ITERATIONS):
-        data = _call_groq(messages)
-        choice = data["choices"][0]["message"]
+        try:
+            data = _call_llm(messages, tools=TOOLS, temperature=0.3)
+            choice = data["choices"][0]["message"]
+        except Exception as e:
+            # This is the one place a Gemini hiccup (rate limit, timeout,
+            # unexpected response shape) used to bubble all the way up to
+            # cogs/ai_chat.py's bare except and vanish silently. Turn it
+            # into a real reply instead.
+            logger.error(f"run_agent_turn: LLM call failed: {e}")
+            return {
+                "reply": "⚠️ I hit an error talking to the AI backend just now (likely rate-limited or briefly down). Try again in a few seconds.",
+                "history": messages[1:],
+                "pending_action": None,
+            }
         messages.append(choice)
 
         tool_calls = choice.get("tool_calls")
@@ -542,13 +1325,18 @@ def run_agent_turn(
                 return {"reply": reply, "history": messages[1:], "pending_action": pending}
 
             if name in DESTRUCTIVE_TOOLS:  # auto_execute is True here
-                ok, error, detail = _run_destructive_tool(name, args, guild_id, discord_api)
+                ok, error, detail = _run_destructive_tool(name, args, guild_id, discord_api, db=db, actor_name=actor_name)
                 if log_action:
                     try:
                         log_action(name, args, ok, error, detail)
                     except Exception as e:
                         logger.error(f"log_action callback failed: {e}")
                 result = {"ok": ok, "error": error} if not ok else {"ok": True, "detail": detail}
+                mark = "✅" if ok else "❌"
+                line = f"{mark} {_friendly_action_description(name, args)}"
+                if not ok:
+                    line += f" — failed: {error}"
+                completed_log.append(line)
             else:
                 result = _run_read_only_tool(name, args, guild_id, discord_api, db)
 
@@ -559,8 +1347,21 @@ def run_agent_turn(
                 "content": json.dumps(result)[:4000],
             })
 
+    if completed_log:
+        # We ran out of turns, but real actions did happen — tell the user
+        # exactly what, instead of a generic "I gave up" that hides whether
+        # anything was actually done to their server.
+        summary = "\n".join(completed_log[-20:])
+        reply = (
+            f"⏳ That request needed more steps than I could finish in one go. "
+            f"Here's what I completed before running out:\n{summary}\n\n"
+            f"Send another message (e.g. \"continue\") and I'll pick up the rest."
+        )
+    else:
+        reply = "I wasn't able to finish that within a reasonable number of steps — try breaking it into a smaller request."
+
     return {
-        "reply": "I wasn't able to finish that within a reasonable number of steps — try breaking it into a smaller request.",
+        "reply": reply,
         "history": messages[1:],
         "pending_action": None,
     }
