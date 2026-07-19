@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timezone
+import asyncio
 from cogs.config import admin_only
 
 class Logging(commands.Cog):
@@ -14,6 +15,33 @@ class Logging(commands.Cog):
         if settings:
             return self.bot.get_channel(settings.get("channel_id"))
         return None
+
+    async def _find_deleter(self, message: discord.Message):
+        """Discord's delete event doesn't say who deleted a message — the
+        only way to find out is the guild audit log, and Discord ONLY
+        writes a MESSAGE_DELETE audit log entry when someone other than the
+        author deletes it (with Manage Messages). Self-deletes never create
+        one. So: found an entry -> that's the mod who deleted it. No entry
+        -> the author almost certainly deleted it themselves.
+
+        Returns (deleter, reason). deleter is a discord.User/Member if
+        found, else None with reason 'self' or 'no_perms'.
+        """
+        await asyncio.sleep(1)  # audit log entries take a moment to appear
+        try:
+            async for entry in message.guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
+                if not entry.target or entry.target.id != message.author.id:
+                    continue
+                entry_channel = getattr(entry.extra, "channel", None)
+                if entry_channel and entry_channel.id != message.channel.id:
+                    continue
+                if (datetime.now(timezone.utc) - entry.created_at).total_seconds() <= 15:
+                    return entry.user, None
+            return None, "self"
+        except discord.Forbidden:
+            return None, "no_perms"
+        except Exception:
+            return None, "self"
 
     @app_commands.command(name="setlogchannel", description="Set the channel for event logs")
     @admin_only()
@@ -34,6 +62,8 @@ class Logging(commands.Cog):
         if not log_channel:
             return
 
+        deleter, reason = await self._find_deleter(message)
+
         embed = discord.Embed(
             title="🗑️ Message Deleted",
             color=discord.Color.red(),
@@ -41,7 +71,13 @@ class Logging(commands.Cog):
         )
         embed.add_field(name="Author", value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
         embed.add_field(name="Channel", value=message.channel.mention, inline=True)
-        
+        if deleter:
+            embed.add_field(name="Deleted By", value=f"{deleter.mention} (`{deleter.id}`)", inline=True)
+        elif reason == "no_perms":
+            embed.add_field(name="Deleted By", value="Unknown — bot needs \"View Audit Log\" permission", inline=True)
+        else:
+            embed.add_field(name="Deleted By", value=f"{message.author.mention} (likely self-deleted)", inline=True)
+
         content = message.content if message.content else "*No text content*"
         if len(content) > 1024:
             content = content[:1021] + "..."
