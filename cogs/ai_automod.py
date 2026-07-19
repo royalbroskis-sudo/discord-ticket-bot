@@ -33,6 +33,7 @@ from discord import app_commands
 
 import ai_agent
 from cogs.config import admin_only, get_guild_config, member_has_role_id
+from cogs import moderation as moderation_cog
 
 logger = logging.getLogger(__name__)
 
@@ -161,24 +162,24 @@ class AIAutoMod(commands.Cog):
         reason = str(decision.get("reason") or "AI AutoMod violation")[:200]
         member = message.author
 
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass  # already deleted, or bot lacks Manage Messages — don't block warn/timeout on this
+
         entry = {
             "reason": f"AI AutoMod: {reason}",
             "mod": str(self.bot.user),
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         }
-        collection = self.db["warnings"]
-        doc = collection.find_one({"guild_id": message.guild.id, "user_id": member.id})
-        current = doc.get("warnings", []) if doc else []
-        current.append(entry)
-        collection.update_one(
-            {"guild_id": message.guild.id, "user_id": member.id},
-            {"$set": {"warnings": current}},
-            upsert=True,
+        # NOTE: /warnings reads from cogs.moderation's in-memory _warnings
+        # dict, not the DB, so writing straight to the warnings collection
+        # (as automod.py does) never actually shows up there — that dict has
+        # to be updated directly, same as the real /warn command does.
+        moderation_cog._warnings[message.guild.id][member.id].append(entry)
+        moderation_cog.save_user_warnings(
+            self.db, message.guild.id, member.id, moderation_cog._warnings[message.guild.id][member.id]
         )
-        # Keep the Moderation cog's in-memory cache in sync, same as automod.py does
-        mod_cog = self.bot.get_cog("Moderation")
-        if mod_cog and hasattr(mod_cog, "_warnings"):
-            mod_cog._warnings[message.guild.id][member.id].append(entry)
 
         timeout_minutes = None
         timeout_ok = True

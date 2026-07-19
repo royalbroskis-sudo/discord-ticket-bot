@@ -35,6 +35,7 @@ import time
 import requests
 
 from personality import PERSONALITY
+from cogs import moderation as moderation_cog
 
 logger = logging.getLogger(__name__)
 
@@ -1211,11 +1212,12 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                     "mod": actor_name,
                     "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
                 }
-                db["warnings"].update_one(
-                    {"guild_id": guild_id, "user_id": int(user_id)},
-                    {"$push": {"warnings": entry}},
-                    upsert=True,
-                )
+                # /warnings reads cogs.moderation's in-memory _warnings dict,
+                # not the DB directly — writing only to the collection (as
+                # this used to do) saves fine but never shows up there until
+                # a restart. Write to both, same as the real /warn command.
+                moderation_cog._warnings[guild_id][int(user_id)].append(entry)
+                moderation_cog.save_user_warnings(db, guild_id, int(user_id), moderation_cog._warnings[guild_id][int(user_id)])
                 ok = True
                 detail = reason
 
@@ -1223,11 +1225,8 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             if db is None:
                 ok, error = False, "Database unavailable"
             else:
-                db["warnings"].update_one(
-                    {"guild_id": guild_id, "user_id": int(user_id)},
-                    {"$set": {"warnings": []}},
-                    upsert=True,
-                )
+                moderation_cog._warnings[guild_id][int(user_id)] = []
+                moderation_cog.save_user_warnings(db, guild_id, int(user_id), [])
                 ok = True
                 detail = "all warnings cleared"
 
