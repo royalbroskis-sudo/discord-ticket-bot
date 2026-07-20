@@ -62,9 +62,14 @@ def get_db():
         if "command_perms" not in collections:
             logger.info("📝 Creating 'command_perms' collection")
             _db.create_collection("command_perms")
-        
+
+        if "afk" not in collections:
+            logger.info("📝 Creating 'afk' collection")
+            _db.create_collection("afk")
+
         # Create index for faster lookups
         _db["command_perms"].create_index([("guild_id", 1), ("command_name", 1)], unique=True)
+        _db["afk"].create_index([("guild_id", 1), ("user_id", 1)], unique=True)
         
         return _db
         

@@ -9,11 +9,14 @@ mentions, etc.), not just in-channel replies. Coming back — posting any
 message, or having AI AutoMod/staff call clear_afk — restores the exact
 nickname the member had before going AFK (including no nickname at all).
 
-State lives in a module-level dict rather than on the cog instance so
-cogs/ai_chat.py's trusted-staff AI agent (via ai_agent.py's set_afk/
-clear_afk tools) and this cog's own /afk command and on_message listener
-all read and write the exact same data — same pattern as
-cogs.moderation._warnings.
+State lives in a module-level dict (for fast, low-latency reads on every
+single message) that's mirrored to MongoDB's "afk" collection on every
+write. The dict is repopulated from the DB on cog load, and clear_afk_entry
+falls back to a direct DB read if a guild/user isn't in memory — this is
+what makes AFK survive bot restarts *and* stay correct if the AI agent's
+set_afk/clear_afk tools ever run from a different process than the bot's
+own gateway connection (e.g. the web dashboard running as its own worker).
+Same pattern as cogs.moderation._warnings + save_user_warnings.
 """
 
 import discord
@@ -35,16 +38,65 @@ def get_afk(guild_id: int, user_id: int) -> dict | None:
     return _afk.get(guild_id, {}).get(user_id)
 
 
-def set_afk_entry(guild_id: int, user_id: int, reason: str, original_nick: str | None):
-    _afk.setdefault(guild_id, {})[user_id] = {"reason": reason, "original_nick": original_nick}
+def load_afk_from_db(db) -> None:
+    """Repopulates the in-memory cache from MongoDB. Call once on bot startup."""
+    if db is None:
+        return
+    _afk.clear()
+    try:
+        for doc in db["afk"].find({}):
+            guild_id = doc.get("guild_id")
+            user_id = doc.get("user_id")
+            if guild_id is None or user_id is None:
+                continue
+            _afk.setdefault(guild_id, {})[user_id] = {
+                "reason": doc.get("reason", "No reason provided"),
+                "original_nick": doc.get("original_nick"),
+            }
+    except Exception:
+        # Don't block bot startup over this — AFK just won't be pre-populated.
+        pass
 
 
-def clear_afk_entry(guild_id: int, user_id: int) -> dict | None:
-    """Removes and returns the entry, or None if the member wasn't AFK."""
-    guild_afk = _afk.get(guild_id)
-    if not guild_afk:
-        return None
-    return guild_afk.pop(user_id, None)
+def set_afk_entry(guild_id: int, user_id: int, reason: str, original_nick: str | None, db=None):
+    entry = {"reason": reason, "original_nick": original_nick}
+    _afk.setdefault(guild_id, {})[user_id] = entry
+    if db is not None:
+        try:
+            db["afk"].update_one(
+                {"guild_id": guild_id, "user_id": user_id},
+                {"$set": {"guild_id": guild_id, "user_id": user_id, **entry}},
+                upsert=True,
+            )
+        except Exception:
+            pass
+
+
+def clear_afk_entry(guild_id: int, user_id: int, db=None) -> dict | None:
+    """Removes and returns the entry, or None if the member wasn't AFK.
+
+    Checks the in-memory cache first; if it's missing there (e.g. this
+    process didn't see the original set_afk call), falls back to the DB
+    before giving up, so a real AFK status never gets reported as absent.
+    """
+    guild_afk = _afk.setdefault(guild_id, {})
+    entry = guild_afk.pop(user_id, None)
+
+    if entry is None and db is not None:
+        try:
+            doc = db["afk"].find_one({"guild_id": guild_id, "user_id": user_id})
+        except Exception:
+            doc = None
+        if doc is not None:
+            entry = {"reason": doc.get("reason", "No reason provided"), "original_nick": doc.get("original_nick")}
+
+    if entry is not None and db is not None:
+        try:
+            db["afk"].delete_one({"guild_id": guild_id, "user_id": user_id})
+        except Exception:
+            pass
+
+    return entry
 
 
 def afk_nickname(base_name: str) -> str:
@@ -56,13 +108,17 @@ class AFK(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def cog_load(self):
+        # Repopulate the in-memory cache from MongoDB so AFK survives restarts.
+        load_afk_from_db(getattr(self.bot, "db", None))
+
     @app_commands.command(name="afk", description="Set your AFK status with an optional reason")
     @app_commands.describe(reason="Why you're going AFK")
     async def afk(self, interaction: discord.Interaction, reason: str = "No reason provided"):
         guild = interaction.guild
         member = interaction.user
 
-        set_afk_entry(guild.id, member.id, reason, member.nick)
+        set_afk_entry(guild.id, member.id, reason, member.nick, db=getattr(self.bot, "db", None))
 
         new_nick = afk_nickname(member.display_name)
         try:
@@ -87,9 +143,10 @@ class AFK(commands.Cog):
             return
 
         guild_id = message.guild.id
+        db = getattr(self.bot, "db", None)
 
         # If the author was AFK, clear their status and restore their nickname.
-        entry = clear_afk_entry(guild_id, message.author.id)
+        entry = clear_afk_entry(guild_id, message.author.id, db=db)
         if entry is not None:
             try:
                 await message.author.edit(

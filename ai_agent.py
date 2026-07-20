@@ -1455,12 +1455,12 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 if not r.ok:
                     ok, error = False, f"HTTP {r.status_code}: {r.text[:200]}"
                 else:
-                    afk_cog.set_afk_entry(guild_id, int(user_id), afk_reason, current_nick)
+                    afk_cog.set_afk_entry(guild_id, int(user_id), afk_reason, current_nick, db=db)
                     ok = True
                     detail = afk_reason
 
         elif tool_name == "clear_afk":
-            entry = afk_cog.clear_afk_entry(guild_id, int(user_id))
+            entry = afk_cog.clear_afk_entry(guild_id, int(user_id), db=db)
             if entry is None:
                 ok, error = False, "That member isn't currently marked AFK."
             else:
