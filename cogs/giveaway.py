@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import random
 import string
 from typing import Optional, List
-from cogs.config import admin_only, is_admin_user, is_staff_user, get_guild_config, TICKET_PREFIXES
+from cogs.config import admin_only, is_admin_user, is_staff_user, get_guild_config, get_configured_role, TICKET_PREFIXES
 from cogs.tickets import TicketView
 
 
@@ -442,8 +442,8 @@ class WinnerClaimView(discord.ui.View):
             ),
         }
 
-        staff_role_name = get_guild_config(interaction.client.db, guild.id)["STAFF_ROLE"]
-        staff_role = discord.utils.get(guild.roles, name=staff_role_name)
+        cfg = get_guild_config(interaction.client.db, guild.id)
+        staff_role = get_configured_role(guild, cfg, "STAFF_ROLE_ID")
         if staff_role:
             overwrites[staff_role] = discord.PermissionOverwrite(
                 read_messages=True, send_messages=True,
