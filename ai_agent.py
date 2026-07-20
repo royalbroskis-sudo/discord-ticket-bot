@@ -36,6 +36,7 @@ import requests
 
 from personality import PERSONALITY
 from cogs import moderation as moderation_cog
+from cogs import afk as afk_cog
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +519,35 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "set_afk",
+            "description": "Mark a member AFK: records the reason and prefixes their server nickname with '[AFK] ' so it's visible everywhere. Their original nickname is remembered and restored automatically the moment they next send a message, or via clear_afk.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "reason": {"type": "string", "description": "Why they're AFK. Defaults to 'No reason provided' if omitted."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_afk",
+            "description": "Manually clear a member's AFK status and restore their original nickname. Normally this happens automatically when they post a message — use this tool only if asked to clear it early on their behalf.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_channel_settings",
             "description": "Edit a channel's topic, slowmode, NSFW flag, or category (parent).",
             "parameters": {
@@ -700,6 +730,10 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
     if tool_name == "set_nickname":
         nick = args.get("nickname")
         return f"Reset nickname for user `{uid}`" if not nick else f"Set nickname for user `{uid}` to `{nick}`"
+    if tool_name == "set_afk":
+        return f"Mark user `{uid}` AFK — reason: {args.get('reason') or 'No reason provided'}"
+    if tool_name == "clear_afk":
+        return f"Clear AFK status for user `{uid}`"
     if tool_name == "edit_channel_settings":
         parts = []
         if args.get("topic") is not None:
@@ -1236,6 +1270,47 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             ok = r.ok
             error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
             detail = nick or "(reset)"
+
+        elif tool_name == "set_afk":
+            m = discord_api("GET", f"/guilds/{guild_id}/members/{user_id}")
+            if not m.ok:
+                ok, error = False, f"HTTP {m.status_code}: {m.text[:200]}"
+            else:
+                mdata = m.json()
+                user_data = mdata.get("user", {}) or {}
+                current_nick = mdata.get("nick")
+                display_name = current_nick or user_data.get("global_name") or user_data.get("username") or user_id
+                afk_reason = (args.get("reason") or "No reason provided").strip()[:200]
+                new_nick = afk_cog.afk_nickname(display_name)
+                r = discord_api(
+                    "PATCH", f"/guilds/{guild_id}/members/{user_id}",
+                    reason=f"AFK: {afk_reason}"[:512], json={"nick": new_nick},
+                )
+                if not r.ok:
+                    ok, error = False, f"HTTP {r.status_code}: {r.text[:200]}"
+                else:
+                    afk_cog.set_afk_entry(guild_id, int(user_id), afk_reason, current_nick)
+                    ok = True
+                    detail = afk_reason
+
+        elif tool_name == "clear_afk":
+            entry = afk_cog.clear_afk_entry(guild_id, int(user_id))
+            if entry is None:
+                ok, error = False, "That member isn't currently marked AFK."
+            else:
+                r = discord_api(
+                    "PATCH", f"/guilds/{guild_id}/members/{user_id}",
+                    reason="No longer AFK", json={"nick": entry["original_nick"]},
+                )
+                if not r.ok:
+                    # Status is already cleared in _afk even if the nickname
+                    # restore fails (e.g. bot's role dropped below theirs) —
+                    # don't leave them stuck "AFK" over a cosmetic failure.
+                    ok, error = True, None
+                    detail = f"AFK cleared, but nickname restore failed: HTTP {r.status_code}"
+                else:
+                    ok = True
+                    detail = "nickname restored"
 
         elif tool_name == "edit_channel_settings":
             channel_id = args.get("channel_id")
