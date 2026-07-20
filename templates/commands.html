@@ -275,7 +275,10 @@
             "Giveaways": {
                 emoji: "🎉",
                 defaultLevel: "admin",
-                commands: ["giveaway", "endgiveaway", "reroll"]
+                commands: [
+                    "giveaway create", "giveaway sponsor", "giveaway unsponsor",
+                    "giveaway paid", "giveaway end", "giveaway reroll", "giveaway delete"
+                ]
             },
             "Sticky": {
                 emoji: "📌",
@@ -326,7 +329,7 @@
                 defaultLevel: "staff",
                 commands: [
                     "whois", "serverinfo", "roleinfo", "channelinfo", "avatar",
-                    "servericon", "userwarnings", "audit", "rolemembers", "cleanup",
+                    "servericon", "userwarnings", "modlogs", "audit", "rolemembers", "cleanup",
                     "clonechannel", "addrole", "removerole", "emojisteal", "multiban", "multimute"
                 ]
             },
@@ -334,19 +337,39 @@
                 emoji: "🏗️",
                 defaultLevel: "staff",
                 commands: [
-                    "build paid", "build money", "build claim",
+                    "buildpanel", "build paid", "build money", "build claim",
                     "build complete", "build cancel", "build addnote"
                 ]
             },
             "Utility": {
                 emoji: "🔧",
                 defaultLevel: "staff",
-                commands: ["afk"]
+                commands: ["afk", "invites", "invite-leaderboard", "stats"]
             },
             "MC Link": {
                 emoji: "⛏️",
                 defaultLevel: "staff",
                 commands: ["link", "unlink", "mcstatus", "mc"]
+            },
+            "AI AutoMod": {
+                emoji: "🤖",
+                defaultLevel: "admin",
+                commands: ["aimod enable", "aimod disable", "aimod status"]
+            },
+            "Vouches": {
+                emoji: "🤝",
+                defaultLevel: "admin",
+                commands: ["vouches", "addvouches", "removevouches", "scan vouches"]
+            },
+            "Promotion": {
+                emoji: "⬆️",
+                defaultLevel: "admin",
+                commands: ["promote", "demote"]
+            },
+            "Embeds & Presence": {
+                emoji: "🖼️",
+                defaultLevel: "admin",
+                commands: ["embed", "activity"]
             }
         };
 
@@ -401,7 +424,8 @@
                     "Moderation": 1, "Giveaways": 2, "Sticky": 3, "Tickets": 4,
                     "Reaction Roles": 5, "Welcome": 6, "AutoMod": 7, "Logging": 8,
                     "Autorole": 9, "Applications": 10, "Staff Utils": 11,
-                    "Building": 12, "Utility": 13
+                    "Building": 12, "Utility": 13, "Vouches": 14, "Promotion": 15,
+                    "Embeds & Presence": 16, "MC Link": 17, "AI AutoMod": 18
                 };
                 return (order[a] || 99) - (order[b] || 99);
             });
