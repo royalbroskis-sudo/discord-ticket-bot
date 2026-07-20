@@ -29,6 +29,38 @@ STATUS_COLORS = {
 }
 
 
+def has_command_permission(interaction: discord.Interaction, command_name: str) -> bool:
+    """Checks the guild's command_perms doc (set from the web dashboard).
+
+    Matches the dashboard's own convention: roles are stored by name, and if
+    no roles are saved for a command it falls back to allowing everyone
+    ("Leave all unchecked = default bot permissions").
+    """
+    if interaction.user.guild_permissions.administrator:
+        return True
+
+    db = getattr(interaction.client, "db", None)
+    if db is None:
+        return True  # fail open if Mongo is down, same as the rest of the bot
+
+    doc = db["command_perms"].find_one({
+        "guild_id": interaction.guild.id,
+        "command_name": command_name,
+    })
+    allowed_roles = doc.get("roles") if doc else None
+    if not allowed_roles:
+        return True
+
+    user_role_names = {r.name for r in interaction.user.roles}
+    return bool(user_role_names & set(allowed_roles))
+
+
+async def deny_permission(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "❌ You don't have permission to use this command.", ephemeral=True
+    )
+
+
 class AuthorizedView(discord.ui.View):
     """Shown while we're waiting on the DonutSMP Discord-DM authorization step."""
 
@@ -132,6 +164,8 @@ class MCLink(commands.Cog):
     # ── Commands ─────────────────────────────────────────────────────────────
     @app_commands.command(name="link", description="Link your own Minecraft (Microsoft) account to the bot.")
     async def link(self, interaction: discord.Interaction):
+        if not has_command_permission(interaction, "link"):
+            return await deny_permission(interaction)
         await interaction.response.defer(ephemeral=True)
         discord_id = str(interaction.user.id)
 
@@ -146,6 +180,8 @@ class MCLink(commands.Cog):
 
     @app_commands.command(name="unlink", description="Remove your linked Minecraft account (requires a fresh login next time).")
     async def unlink(self, interaction: discord.Interaction):
+        if not has_command_permission(interaction, "unlink"):
+            return await deny_permission(interaction)
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
         await self._post(f"/full-logout/{discord_id}")
@@ -153,6 +189,8 @@ class MCLink(commands.Cog):
 
     @app_commands.command(name="mcstatus", description="Check your Minecraft link status.")
     async def mcstatus(self, interaction: discord.Interaction):
+        if not has_command_permission(interaction, "mcstatus"):
+            return await deny_permission(interaction)
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
         status = await self._get(f"/status/{discord_id}")
@@ -161,6 +199,8 @@ class MCLink(commands.Cog):
     @app_commands.command(name="mc", description="Run an in-game command as your own linked Minecraft account.")
     @app_commands.describe(command="The command to run, without a leading slash")
     async def mc(self, interaction: discord.Interaction, command: str):
+        if not has_command_permission(interaction, "mc"):
+            return await deny_permission(interaction)
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
         result = await self._post(f"/run-command/{discord_id}", json={"command": command})
