@@ -1635,87 +1635,19 @@ def bot_agent_execute(guild_id):
     if tool not in ai_agent.DESTRUCTIVE_TOOLS:
         return jsonify({"ok": False, "error": "That tool isn't executable via this endpoint."}), 400
 
-    user_id = str(args.get("user_id", "") or "")
-    reason = (args.get("reason") or "Requested via AI agent").strip()
-    ok, error, detail = False, None, ""
+    actor = session.get("discord_user", {})
+    actor_name = actor.get("username") or "AI"
 
     try:
-        if tool == "kick_member":
-            r = _discord_api("DELETE", f"/guilds/{guild_id}/members/{user_id}", reason=reason)
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-            detail = reason
-
-        elif tool == "ban_member":
-            delete_days = max(0, min(7, int(args.get("delete_days", 0) or 0)))
-            r = _discord_api(
-                "PUT", f"/guilds/{guild_id}/bans/{user_id}",
-                reason=reason, json={"delete_message_seconds": delete_days * 86400},
-            )
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-            detail = reason
-
-        elif tool == "unban_member":
-            r = _discord_api("DELETE", f"/guilds/{guild_id}/bans/{user_id}")
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-
-        elif tool == "timeout_member":
-            minutes = max(1, min(40320, int(args.get("minutes", 10) or 10)))
-            until = (datetime.utcnow() + timedelta(minutes=minutes)).isoformat() + "Z"
-            r = _discord_api(
-                "PATCH", f"/guilds/{guild_id}/members/{user_id}",
-                reason=reason, json={"communication_disabled_until": until},
-            )
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-            detail = f"{minutes}m — {reason}"
-
-        elif tool == "remove_timeout":
-            r = _discord_api(
-                "PATCH", f"/guilds/{guild_id}/members/{user_id}",
-                json={"communication_disabled_until": None},
-            )
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-
-        elif tool in ("add_role", "remove_role"):
-            role_id = args.get("role_id")
-            method = "PUT" if tool == "add_role" else "DELETE"
-            r = _discord_api(method, f"/guilds/{guild_id}/members/{user_id}/roles/{role_id}")
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-            detail = f"role {role_id}"
-
-        elif tool == "send_message":
-            channel_id = args.get("channel_id")
-            content = (args.get("content") or "").strip()[:2000]
-            r = _discord_api("POST", f"/channels/{channel_id}/messages", json={"content": content})
-            ok = r.ok
-            error = None if ok else _discord_err(r)
-            detail = f"channel #{channel_id}: {content[:80]}"
-
-        elif tool == "dm_user":
-            content = (args.get("content") or "").strip()[:2000]
-            dm = _discord_api("POST", "/users/@me/channels", json={"recipient_id": user_id})
-            if not dm.ok:
-                ok, error = False, _discord_err(dm)
-            else:
-                dm_channel_id = dm.json()["id"]
-                r = _discord_api("POST", f"/channels/{dm_channel_id}/messages", json={"content": content})
-                ok = r.ok
-                error = None if ok else _discord_err(r)
-            detail = content[:80]
-
-        else:
-            error = "Unknown action."
-
+        ok, error, detail = ai_agent._run_destructive_tool(
+            tool, args, guild_id, _discord_api, db=db, actor_name=actor_name
+        )
     except Exception as e:
         logger.error(f"Agent execute '{tool}' failed: {e}")
-        ok, error = False, str(e)[:300]
+        ok, error, detail = False, str(e)[:300], ""
 
-    _log_console_action(guild_id, f"agent_{tool}", user_id or args.get("channel_id"), detail, ok, error)
+    target_id = args.get("user_id") or args.get("channel_id") or args.get("role_id")
+    _log_console_action(guild_id, f"agent_{tool}", target_id, detail, ok, error)
 
     return jsonify({"ok": ok, "error": error})
 

@@ -37,6 +37,7 @@ import requests
 from personality import PERSONALITY
 from cogs import moderation as moderation_cog
 from cogs import afk as afk_cog
+from cogs import tickets as tickets_cog
 
 logger = logging.getLogger(__name__)
 
@@ -669,6 +670,73 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_ticket",
+            "description": (
+                "Close a support ticket channel: generates and saves a full transcript, "
+                "posts a summary to the configured transcript log channel (if any), DMs the "
+                "ticket creator a link to the transcript, then deletes the channel. This only "
+                "works on real ticket channels (ones created through the ticket panel system, "
+                "identified by their topic) — it refuses on regular channels, use delete_channel "
+                "for those instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["channel_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rename_ticket",
+            "description": "Rename a ticket channel. Only works on real ticket channels — refuses on regular channels (use rename_channel for those).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "name": {"type": "string"},
+                },
+                "required": ["channel_id", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_user_to_ticket",
+            "description": "Give a user view/send access to an existing ticket channel — e.g. pulling in another staff member or a second customer. Only works on real ticket channels.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                },
+                "required": ["channel_id", "user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_user_from_ticket",
+            "description": "Remove a user's view/send access to a ticket channel. Only works on real ticket channels.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                },
+                "required": ["channel_id", "user_id"],
+            },
+        },
+    },
 ]
 
 READ_ONLY_TOOLS = {
@@ -767,6 +835,14 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
     if tool_name == "purge_messages":
         who = f" from user `{args.get('only_from_user_id')}`" if args.get("only_from_user_id") else ""
         return f"Bulk-delete up to {args.get('count')} recent messages{who} in channel `{args.get('channel_id')}`"
+    if tool_name == "close_ticket":
+        return f"Close ticket `{args.get('channel_id')}` — save transcript, notify creator, and delete the channel"
+    if tool_name == "rename_ticket":
+        return f"Rename ticket `{args.get('channel_id')}` to `#{args.get('name')}`"
+    if tool_name == "add_user_to_ticket":
+        return f"Add user `{uid}` to ticket `{args.get('channel_id')}`"
+    if tool_name == "remove_user_from_ticket":
+        return f"Remove user `{uid}` from ticket `{args.get('channel_id')}`"
     return f"{tool_name}({args})"
 
 
@@ -820,6 +896,96 @@ def _snowflake_to_iso(snowflake) -> str | None:
         return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
     except (TypeError, ValueError):
         return None
+
+
+def _snowflake_to_datetime(snowflake):
+    """Same decode as _snowflake_to_iso but returns a datetime, for callers
+    (like the ticket transcript generator) that need to call .strftime()."""
+    from datetime import datetime, timezone
+    try:
+        ms = (int(snowflake) >> 22) + DISCORD_EPOCH_MS
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc)
+
+
+class _ChannelShim:
+    """Minimal stand-in for a discord.py TextChannel object — just enough to
+    satisfy cogs.tickets' helper functions (has_ticket_topic, get_creator_name,
+    _generate_html), which only ever touch .name / .topic / .created_at.
+    Needed because the agent talks to Discord over raw REST (no live
+    discord.py Client here), so there's no real channel object to pass in."""
+    def __init__(self, name, topic, created_at=None):
+        self.name = name
+        self.topic = topic
+        self.created_at = created_at
+
+
+def _fetch_all_ticket_messages(discord_api, channel_id, hard_cap: int = 2000):
+    """Fetch a ticket channel's full history (oldest-first) for transcript
+    generation, in the shape cogs.tickets._generate_html expects. Paginates
+    in batches of 100 (Discord's max per request) up to hard_cap messages so
+    an unusually long-lived ticket can't loop forever.
+    Returns (messages, error) — error is None on success."""
+    from datetime import datetime as _dt
+
+    messages = []
+    before = None
+    while len(messages) < hard_cap:
+        params = {"limit": 100}
+        if before:
+            params["before"] = before
+        r = discord_api("GET", f"/channels/{channel_id}/messages", params=params)
+        if not r.ok:
+            return None, f"HTTP {r.status_code}: {r.text[:200]}"
+        batch = r.json()
+        if not batch:
+            break
+        for m in batch:
+            author = m.get("author", {}) or {}
+            avatar_url = None
+            if author.get("avatar"):
+                avatar_url = f"https://cdn.discordapp.com/avatars/{author.get('id')}/{author['avatar']}.png"
+            ts_raw = m.get("timestamp", "") or ""
+            try:
+                ts_fmt = _dt.fromisoformat(ts_raw).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except ValueError:
+                ts_fmt = ts_raw
+            messages.append({
+                "id": m.get("id"),
+                "author": author.get("username", "Unknown"),
+                "author_id": author.get("id"),
+                "timestamp": ts_fmt,
+                "content": m.get("content") or "",
+                "attachments": [
+                    {"filename": a.get("filename", ""), "url": a.get("url", "")}
+                    for a in m.get("attachments", [])
+                ],
+                "is_bot": bool(author.get("bot")),
+                "is_system": False,
+                "avatar_url": avatar_url,
+            })
+        before = batch[-1]["id"]
+        if len(batch) < 100:
+            break
+    messages.reverse()  # Discord returns newest-first; transcripts read oldest-first
+    return messages, None
+
+
+def _parse_ticket_topic(topic: str) -> tuple[str, str]:
+    """Mirrors the topic-parsing block in cogs.tickets._close_ticket so the
+    agent's transcript looks the same as one closed via /close."""
+    creator_name, category = "Unknown", "Unknown"
+    topic = topic or ""
+    if "Ticket by " in topic:
+        creator_name = topic.split("Ticket by ")[1].split(" |")[0].strip()
+        if "|" in topic:
+            category = topic.split("|")[1].strip()
+    elif "Buyer: " in topic:
+        creator_name = topic.split("Buyer: ")[1].split(" |")[0].strip()
+        if "Build: " in topic:
+            category = "Build: " + topic.split("Build: ")[1].split(" |")[0].strip()
+    return creator_name, category
 
 
 # ---------------------------------------------------------------------------
@@ -1415,6 +1581,135 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                     ok = rd.ok
                     error = None if ok else f"HTTP {rd.status_code}: {rd.text[:200]}"
                     detail = f"{len(ids)} message(s) deleted"
+
+        elif tool_name == "close_ticket":
+            channel_id = args.get("channel_id")
+            cr = discord_api("GET", f"/channels/{channel_id}")
+            if not cr.ok:
+                ok, error = False, f"HTTP {cr.status_code}: {cr.text[:200]}"
+            else:
+                cdata = cr.json()
+                topic = cdata.get("topic") or ""
+                shim = _ChannelShim(cdata.get("name", ""), topic, _snowflake_to_datetime(channel_id))
+                if not tickets_cog.has_ticket_topic(shim):
+                    ok, error = False, "That doesn't look like a ticket channel (no ticket topic found) — refusing to close it as one. Use delete_channel for regular channels."
+                else:
+                    creator_name, category = _parse_ticket_topic(topic)
+                    messages, fetch_error = _fetch_all_ticket_messages(discord_api, channel_id)
+                    if fetch_error:
+                        ok, error = False, fetch_error
+                    else:
+                        creator_id = None
+                        for m in messages:
+                            if not m["is_bot"] and m["author"].lower().startswith(creator_name.lower()):
+                                creator_id = m["author_id"]
+                                break
+
+                        html_content = tickets_cog._generate_html(shim, messages, actor_name, creator_name, category)
+
+                        transcript_doc = {
+                            "_id": tickets_cog.ObjectId(),
+                            "guild_id": guild_id,
+                            "channel_id": int(channel_id),
+                            "channel_name": shim.name,
+                            "creator_name": creator_name,
+                            "category": category,
+                            "closed_by": actor_name,
+                            "closed_by_id": None,
+                            "created_at": shim.created_at,
+                            "closed_at": datetime.utcnow(),
+                            "message_count": len(messages),
+                            "html_content": html_content,
+                            "participants": list({m["author_id"] for m in messages if not m["is_bot"]}),
+                        }
+                        if db is not None:
+                            try:
+                                db["transcripts"].insert_one(transcript_doc)
+                            except Exception as e:
+                                logger.error(f"close_ticket: failed to save transcript: {e}")
+
+                        dashboard_url = os.getenv("DASHBOARD_URL", "https://your-domain.com")
+                        cfg = tickets_cog.get_guild_config(db, guild_id) if db is not None else {}
+                        tc_id = cfg.get("TRANSCRIPT_CHANNEL_ID") if cfg else None
+                        if tc_id:
+                            log_embed = {
+                                "title": f"📑 Ticket Closed: {shim.name}",
+                                "description": (
+                                    f"**Category:** {category}\n**Creator:** {creator_name}\n"
+                                    f"**Closed By:** {actor_name}\n**Messages:** {len(messages)}"
+                                ),
+                                "color": 0x5865F2,
+                                "fields": [{
+                                    "name": "View Transcript",
+                                    "value": f"[Click here]({dashboard_url}/transcripts/{transcript_doc['_id']})",
+                                    "inline": False,
+                                }],
+                            }
+                            discord_api("POST", f"/channels/{tc_id}/messages", json={"embeds": [log_embed]})
+
+                        if creator_id:
+                            dm = discord_api("POST", "/users/@me/channels", json={"recipient_id": creator_id})
+                            if dm.ok:
+                                dm_channel_id = dm.json()["id"]
+                                dm_embed = {
+                                    "title": f"📑 Ticket Closed: {shim.name}",
+                                    "description": f"Your ticket has been closed by {actor_name}.",
+                                    "color": 0x5865F2,
+                                    "fields": [{
+                                        "name": "View Full Transcript",
+                                        "value": f"{dashboard_url}/transcripts/{transcript_doc['_id']}",
+                                        "inline": False,
+                                    }],
+                                }
+                                discord_api("POST", f"/channels/{dm_channel_id}/messages", json={"embeds": [dm_embed]})
+
+                        rd = discord_api("DELETE", f"/channels/{channel_id}", reason=reason)
+                        ok = rd.ok
+                        error = None if ok else f"HTTP {rd.status_code}: {rd.text[:200]}"
+                        detail = f"ticket {shim.name} ({len(messages)} messages) — transcript saved"
+
+        elif tool_name == "rename_ticket":
+            channel_id = args.get("channel_id")
+            name = (args.get("name") or "").strip()[:100]
+            cr = discord_api("GET", f"/channels/{channel_id}")
+            if not cr.ok:
+                ok, error = False, f"HTTP {cr.status_code}: {cr.text[:200]}"
+            else:
+                cdata = cr.json()
+                shim = _ChannelShim(cdata.get("name", ""), cdata.get("topic") or "")
+                if not tickets_cog.has_ticket_topic(shim):
+                    ok, error = False, "That doesn't look like a ticket channel — use rename_channel for regular channels."
+                else:
+                    r = discord_api("PATCH", f"/channels/{channel_id}", reason=reason, json={"name": name})
+                    ok = r.ok
+                    error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+                    detail = f"ticket {channel_id} -> #{name}"
+
+        elif tool_name in ("add_user_to_ticket", "remove_user_from_ticket"):
+            channel_id = args.get("channel_id")
+            cr = discord_api("GET", f"/channels/{channel_id}")
+            if not cr.ok:
+                ok, error = False, f"HTTP {cr.status_code}: {cr.text[:200]}"
+            else:
+                cdata = cr.json()
+                shim = _ChannelShim(cdata.get("name", ""), cdata.get("topic") or "")
+                if not tickets_cog.has_ticket_topic(shim):
+                    ok, error = False, "That doesn't look like a ticket channel."
+                elif tool_name == "add_user_to_ticket":
+                    # VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY | ATTACH_FILES
+                    perms = 0x400 | 0x800 | 0x10000 | 0x8000
+                    r = discord_api(
+                        "PUT", f"/channels/{channel_id}/permissions/{user_id}",
+                        reason=reason, json={"type": 1, "allow": str(perms), "deny": "0"},
+                    )
+                    ok = r.ok
+                    error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+                    detail = f"user {user_id} added to ticket {channel_id}"
+                else:
+                    r = discord_api("DELETE", f"/channels/{channel_id}/permissions/{user_id}", reason=reason)
+                    ok = r.ok
+                    error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
+                    detail = f"user {user_id} removed from ticket {channel_id}"
 
         else:
             error = "Unknown action."
