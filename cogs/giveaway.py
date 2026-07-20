@@ -329,7 +329,9 @@ class ClaimIGNModal(discord.ui.Modal, title="Claim Your Prize"):
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
-        print(f"ClaimIGNModal error: {error}")
+        import traceback
+        print("ClaimIGNModal error:")
+        traceback.print_exception(type(error), error, error.__traceback__)
         try:
             if interaction.response.is_done():
                 await interaction.followup.send("❌ Something went wrong submitting your claim.", ephemeral=True)
