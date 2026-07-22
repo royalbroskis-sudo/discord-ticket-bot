@@ -154,10 +154,11 @@ class ClaimManager:
             return []
     
     def get_unpaid_claims_for_giveaway(self, giveaway_message_id: int) -> List[dict]:
-        """Get unpaid claims for a giveaway."""
+        """Get UNPAID claims for a giveaway (paid: False)."""
         if self.db is None:
             return []
         try:
+            # Explicitly filter for paid: False
             return list(self.db["giveaway_claims"].find({
                 "giveaway_message_id": giveaway_message_id,
                 "paid": False
@@ -167,10 +168,11 @@ class ClaimManager:
             return []
     
     def get_all_unpaid_claims(self) -> List[dict]:
-        """Get all unpaid claims across all giveaways."""
+        """Get ALL UNPAID claims across all giveaways (paid: False)."""
         if self.db is None:
             return []
         try:
+            # Explicitly filter for paid: False
             return list(self.db["giveaway_claims"].find({"paid": False}))
         except Exception as e:
             print(f"❌ Failed to fetch unpaid claims: {e}")
@@ -181,8 +183,14 @@ class ClaimManager:
         if self.db is None:
             return False
         try:
+            # First check if the claim is already paid
+            existing = self.db["giveaway_claims"].find_one({"_id": ObjectId(claim_id)})
+            if existing and existing.get("paid") == True:
+                print(f"⚠️ Claim {claim_id} is already paid! Skipping.")
+                return False
+            
             result = self.db["giveaway_claims"].update_one(
-                {"_id": ObjectId(claim_id)},
+                {"_id": ObjectId(claim_id), "paid": False},  # Only update if not paid
                 {"$set": {
                     "paid": True,
                     "paid_at": datetime.utcnow(),
@@ -204,7 +212,30 @@ class ClaimManager:
         except Exception as e:
             print(f"❌ Failed to fetch claim: {e}")
             return None
-
+    
+    def get_paid_claims_for_giveaway(self, giveaway_message_id: int) -> List[dict]:
+        """Get PAID claims for a giveaway."""
+        if self.db is None:
+            return []
+        try:
+            return list(self.db["giveaway_claims"].find({
+                "giveaway_message_id": giveaway_message_id,
+                "paid": True
+            }))
+        except Exception as e:
+            print(f"❌ Failed to fetch paid claims: {e}")
+            return []
+    
+    def is_claim_paid(self, claim_id: str) -> bool:
+        """Check if a claim is already paid."""
+        if self.db is None:
+            return False
+        try:
+            claim = self.db["giveaway_claims"].find_one({"_id": ObjectId(claim_id)})
+            return claim.get("paid") == True if claim else False
+        except Exception as e:
+            print(f"❌ Failed to check claim paid status: {e}")
+            return False
 
 # ---------------------------------------------------------------------------
 # Data persistence (MongoDB)

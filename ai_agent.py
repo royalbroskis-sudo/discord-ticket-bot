@@ -746,7 +746,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_giveaways",
-            "description": "List giveaways (active and recently ended) with their message IDs, titles, prizes, and status. Use this to find the message_id needed for end_giveaway, reroll_giveaway, delete_giveaway, or pay_giveaway_claims — never guess an ID.",
+            "description": "List giveaways with their claims and payment status. For each giveaway, shows: claimed_users (users who opened claim tickets), total_claims (total claims filed), unpaid_claims (claims not yet paid), paid_claims (claims already paid), all_claims_paid (whether all claims are paid). Use this to check which giveaways still have unpaid claims.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -797,12 +797,47 @@ TOOLS = [
             },
         },
     },
+    # ---- Promotion tools (mirrors cogs/promotion.py's /promote and /demote) ----
+    {
+        "type": "function",
+        "function": {
+            "name": "promote_member",
+            "description": "Promote a member by giving them a role, and announce it in the configured promotion-announcement channel (same behavior as the /promote slash command). Resolve user_id via lookup_user and new_role_id/old_role_id via list_roles first — never guess IDs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "new_role_id": {"type": "string", "description": "The role to give them"},
+                    "old_role_id": {"type": "string", "description": "Optional: their previous rank, shown in the announcement (not removed)"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["user_id", "new_role_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "demote_member",
+            "description": "Demote a member by removing a role (optionally giving them a lower role in its place), and announce it in the configured promotion-announcement channel (same behavior as the /demote slash command). Resolve user_id via lookup_user and old_role_id/new_role_id via list_roles first — never guess IDs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "old_role_id": {"type": "string", "description": "The role to remove from them"},
+                    "new_role_id": {"type": "string", "description": "Optional: the role to drop them down to (leave blank for plain Member)"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["user_id", "old_role_id"],
+            },
+        },
+    },
     # ---- Payment tools ----
     {
         "type": "function",
         "function": {
             "name": "pay_giveaway_claims",
-            "description": "Pay all unpaid winners for a specific giveaway. Use this when someone says 'pay giveaway <message_id>' or 'pay everyone for this giveaway'. You MUST resolve the giveaway's message_id via list_giveaways first — never guess an ID.",
+            "description": "Pay all UNPAID winners for a specific giveaway. This only pays claims that have not been paid yet. If a claim is already paid, it will be skipped. Use this when someone says 'pay giveaway <message_id>' or 'pay everyone for this giveaway'. You MUST resolve the giveaway's message_id via list_giveaways first — never guess an ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -816,7 +851,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "pay_all_claims",
-            "description": "Pay all unpaid winners across ALL giveaways. Use this when someone says 'pay all claim tickets' or 'pay all winners'.",
+            "description": "Pay all UNPAID winners across ALL giveaways. This only pays claims that have not been paid yet. If a claim is already paid, it will be skipped. Use this when someone says 'pay all claim tickets' or 'pay all winners'.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -936,9 +971,21 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
     if tool_name == "delete_giveaway":
         return f"Permanently delete giveaway `{args.get('message_id')}` (cannot be undone)"
     if tool_name == "pay_giveaway_claims":
-        return f"Pay all unpaid winners for giveaway `{args.get('giveaway_message_id')}`"
+        return f"Pay all UNPAID winners for giveaway `{args.get('giveaway_message_id')}`"
     if tool_name == "pay_all_claims":
-        return f"Pay all unpaid winners across ALL giveaways"
+        return f"Pay all UNPAID winners across ALL giveaways"
+    if tool_name == "list_giveaways":
+        return f"List giveaways with payment status (unpaid claims count)"
+    if tool_name == "promote_member":
+        base = f"Promote user `{uid}` — give role `{args.get('new_role_id')}`"
+        if args.get("old_role_id"):
+            base += f" (was role `{args.get('old_role_id')}`)"
+        return base + f" — reason: {args.get('reason') or 'none given'}"
+    if tool_name == "demote_member":
+        base = f"Demote user `{uid}` — remove role `{args.get('old_role_id')}`"
+        if args.get("new_role_id"):
+            base += f" (drop to role `{args.get('new_role_id')}`)"
+        return base + f" — reason: {args.get('reason') or 'none given'}"
     return f"{tool_name}({args})"
 
 
@@ -1298,9 +1345,30 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
             cog = _get_giveaways_cog(bot)
             query = (args.get("query") or "").lower()
             giveaways = []
+            
+            # Get claim manager to check payment status
+            from cogs.giveaway import ClaimManager
+            claim_mgr = ClaimManager(db) if db is not None else None
+            
             for msg_id, g in cog.giveaway_data.active_giveaways.items():
                 if query and query not in g.title.lower() and query not in g.prize.lower():
                     continue
+                
+                # Get claims for this giveaway
+                claims = []
+                unpaid_count = 0
+                paid_count = 0
+                total_claims = 0
+                
+                if claim_mgr:
+                    claims = claim_mgr.get_claims_for_giveaway(msg_id)
+                    total_claims = len(claims)
+                    for claim in claims:
+                        if claim.get("paid", False):
+                            paid_count += 1
+                        else:
+                            unpaid_count += 1
+                
                 giveaways.append({
                     "message_id": str(msg_id),
                     "display_id": g.display_id,
@@ -1311,7 +1379,11 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
                     "winners_count": g.winners_count,
                     "entries": len(g.entries),
                     "winners": [str(w) for w in g.winners] if g.ended else [],
-                    "claimed_users": [str(u) for u in g.claimed_users],
+                    "claimed_users": [str(u) for u in g.claimed_users],  # Users who opened claim tickets
+                    "total_claims": total_claims,
+                    "unpaid_claims": unpaid_count,
+                    "paid_claims": paid_count,
+                    "all_claims_paid": unpaid_count == 0 and total_claims > 0,
                 })
             return {"giveaways": giveaways}
 
@@ -1359,6 +1431,112 @@ def simple_chat(messages: list, temperature: float = 0.7, max_tokens: int = 600)
     agent, which uses run_agent_turn below)."""
     data = _call_llm(messages, temperature=temperature, max_tokens=max_tokens)
     return data["choices"][0]["message"]["content"] or "..."
+
+
+PROMOTE_COLOR = 0x3BA55D  # green, matches cogs/promotion.py's PROMOTE_COLOR
+DEMOTE_COLOR = 0xDD2E44   # red, matches cogs/promotion.py's DEMOTE_COLOR
+DEFAULT_PROMOTION_REASON = "No reason provided"
+
+
+def _get_role_name(discord_api, guild_id, role_id):
+    if not role_id:
+        return None
+    r = discord_api("GET", f"/guilds/{guild_id}/roles")
+    if not r.ok:
+        return str(role_id)
+    for ro in r.json():
+        if str(ro.get("id")) == str(role_id):
+            return ro.get("name")
+    return str(role_id)
+
+
+def _run_promotion_tool(tool_name, args, guild_id, discord_api, db, reason, actor_name):
+    """Implements promote_member / demote_member for the AI agent: gives/removes
+    a role via REST and posts the same announcement embed cogs/promotion.py's
+    /promote and /demote slash commands post, using the guild's configured
+    PROMOTE_ANNOUNCE_CHANNEL_ID from bot_config."""
+    user_id = str(args.get("user_id", ""))
+    is_promote = tool_name == "promote_member"
+    reason = reason or DEFAULT_PROMOTION_REASON
+
+    m = discord_api("GET", f"/guilds/{guild_id}/members/{user_id}")
+    if not m.ok:
+        return False, f"HTTP {m.status_code}: {m.text[:200]}", ""
+    member = m.json()
+    user = member.get("user", {}) or {}
+    display_name = member.get("nick") or user.get("global_name") or user.get("username") or user_id
+
+    if is_promote:
+        new_role_id = args.get("new_role_id")
+        old_role_id = args.get("old_role_id")
+        current_role_ids = {str(rid) for rid in member.get("roles", [])}
+        if str(new_role_id) in current_role_ids:
+            new_role_name = _get_role_name(discord_api, guild_id, new_role_id)
+            return False, f"{display_name} already has the **{new_role_name}** role.", ""
+
+        r = discord_api("PUT", f"/guilds/{guild_id}/members/{user_id}/roles/{new_role_id}",
+                         reason=f"Promoted by {actor_name}: {reason}")
+        if not r.ok:
+            return False, f"HTTP {r.status_code}: {r.text[:200]}", ""
+
+        new_label = _get_role_name(discord_api, guild_id, new_role_id)
+        old_label = _get_role_name(discord_api, guild_id, old_role_id) if old_role_id else None
+        detail = f"gave role {new_label} to {display_name}" + (f" (was {old_label})" if old_label else "")
+    else:
+        old_role_id = args.get("old_role_id")
+        new_role_id = args.get("new_role_id")
+        current_role_ids = {str(rid) for rid in member.get("roles", [])}
+        if str(old_role_id) not in current_role_ids:
+            old_role_name = _get_role_name(discord_api, guild_id, old_role_id)
+            return False, f"{display_name} doesn't have the **{old_role_name}** role.", ""
+
+        r = discord_api("DELETE", f"/guilds/{guild_id}/members/{user_id}/roles/{old_role_id}",
+                         reason=f"Demoted by {actor_name}: {reason}")
+        if not r.ok:
+            return False, f"HTTP {r.status_code}: {r.text[:200]}", ""
+
+        if new_role_id and str(new_role_id) not in current_role_ids:
+            r2 = discord_api("PUT", f"/guilds/{guild_id}/members/{user_id}/roles/{new_role_id}",
+                              reason=f"Demoted by {actor_name}: {reason}")
+            if not r2.ok:
+                return False, f"HTTP {r2.status_code}: {r2.text[:200]}", ""
+
+        old_label = _get_role_name(discord_api, guild_id, old_role_id)
+        new_label = _get_role_name(discord_api, guild_id, new_role_id) if new_role_id else "Member"
+        detail = f"removed role {old_label} from {display_name}, new rank {new_label}"
+
+    # --- Build and post the announcement embed, same shape as build_rank_embed ---
+    title = "⬆️ Promotion" if is_promote else "⬇️ Demotion"
+    color = PROMOTE_COLOR if is_promote else DEMOTE_COLOR
+    movement_arrow = "⬆️" if is_promote else "⬇️"
+    fields = [
+        {"name": "👤 Member", "value": f"<@{user_id}>\n`{user.get('username', display_name)}`", "inline": True},
+        {"name": "⭐ By", "value": actor_name, "inline": True},
+    ]
+    if is_promote:
+        if old_role_id:
+            fields.append({"name": "Movement", "value": f"{movement_arrow} **{old_label}** → **{new_label}**", "inline": False})
+        else:
+            fields.append({"name": "Role Given", "value": f"{movement_arrow} **{new_label}**", "inline": False})
+    else:
+        fields.append({"name": "Movement", "value": f"{movement_arrow} **{old_label}** → **{new_label}**", "inline": False})
+    fields.append({"name": "❓ Reason", "value": reason, "inline": False})
+
+    embed = {
+        "title": title,
+        "color": color,
+        "fields": fields,
+        "thumbnail": {"url": user.get("avatar") and f"https://cdn.discordapp.com/avatars/{user_id}/{user['avatar']}.png" or None},
+    }
+    embed = {k: v for k, v in embed.items() if v is not None and v != {"url": None}}
+
+    if db is not None:
+        cfg = db["bot_config"].find_one({"guild_id": guild_id}) or {}
+        channel_id = cfg.get("PROMOTE_ANNOUNCE_CHANNEL_ID")
+        if channel_id:
+            discord_api("POST", f"/channels/{channel_id}/messages", json={"embeds": [embed]})
+
+    return True, None, detail
 
 
 def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api, db=None, actor_name: str = "AI", discord_id: str = None, bot=None):
@@ -1432,6 +1610,9 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             ok = r.ok
             error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
             detail = f"role {role_id}"
+
+        elif tool_name in ("promote_member", "demote_member"):
+            ok, error, detail = _run_promotion_tool(tool_name, args, guild_id, discord_api, db, reason, actor_name)
 
         elif tool_name == "send_message":
             channel_id = args.get("channel_id")
@@ -1928,8 +2109,6 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                                             user_id = int(match.group(1))
                                         except ValueError:
                                             pass
-                                    # If that fails, actor_name might be just the username with no ID
-                                    # In that case, we can't proceed
                                 
                                 if not user_id:
                                     ok, error = False, "Could not determine Discord user ID for MC bot payment. Please link your MC account first."
