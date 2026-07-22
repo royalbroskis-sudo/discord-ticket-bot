@@ -491,14 +491,15 @@ def guild_dashboard(guild_id):
                     json={"embeds": [embed_payload], "components": [component]},
                 )
 
+        # In app.py, the building_config form type handler (already present):
+
         elif form_type == "building_config":
             builder_role = request.form.get("BUILDER_ROLE_ID")
             ticket_ping = request.form.get("BUILD_TICKET_PING_ROLE_ID")
             order_ping = request.form.get("BUILD_ORDER_PING_ROLE_ID")
             payment_method = request.form.get("PAYMENT_METHOD", "")
             payment_receiver_ign = request.form.get("PAYMENT_RECEIVER_IGN", "").strip()
-            # NEW: payment log channel
-            payment_log_channel_id = request.form.get("PAYMENT_LOG_CHANNEL_ID")
+            payment_log_channel_id = request.form.get("PAYMENT_LOG_CHANNEL_ID")  # <-- This captures the channel
 
             db["bot_config"].update_one(
                 {"guild_id": guild_id},
@@ -508,8 +509,7 @@ def guild_dashboard(guild_id):
                     "BUILD_ORDER_PING_ROLE_ID": int(order_ping) if order_ping and order_ping != "none" else None,
                     "PAYMENT_METHOD": payment_method.strip() if payment_method else "",
                     "PAYMENT_RECEIVER_IGN": payment_receiver_ign if payment_receiver_ign else None,
-                    "PAYMENT_LOG_CHANNEL_ID": int(payment_log_channel_id) if payment_log_channel_id and payment_log_channel_id != "none" else None,
-                    # Unset legacy tier fields so old data doesn't linger/confuse the dashboard
+                    "PAYMENT_LOG_CHANNEL_ID": int(payment_log_channel_id) if payment_log_channel_id and payment_log_channel_id != "none" else None,  # <-- This saves it
                     "BUILDER_T1_ROLE_ID": None,
                     "BUILDER_T2_ROLE_ID": None,
                     "BUILDER_T3_ROLE_ID": None,
@@ -622,6 +622,7 @@ def guild_dashboard(guild_id):
         "command_perms": {doc["command_name"]: doc["roles"] for doc in db["command_perms"].find({"guild_id": guild_id})},
         "building": {
             "config": db["bot_config"].find_one({"guild_id": guild_id}) or {},
+            # The config includes PAYMENT_LOG_CHANNEL_ID
             "builds": (db["building_panels"].find_one({"guild_id": guild_id}) or {}).get("builds", [])
         },
     }

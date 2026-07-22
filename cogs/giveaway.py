@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import random
 import string
 from typing import Optional, List
+from bson import ObjectId
 from cogs.config import admin_only, is_admin_user, is_staff_user, get_guild_config, get_configured_role, TICKET_PREFIXES
 from cogs.tickets import TicketView
 
@@ -77,6 +78,118 @@ def get_claim_winner(channel: discord.TextChannel) -> Optional[discord.Member]:
         if isinstance(target, discord.Member):
             return target
     return None
+
+
+# ---------------------------------------------------------------------------
+# ClaimManager - Structured claim storage with payment tracking
+# ---------------------------------------------------------------------------
+
+class ClaimManager:
+    """Manages prize claims with payment tracking."""
+    
+    def __init__(self, db):
+        self.db = db
+        self._ensure_indexes()
+    
+    def _ensure_indexes(self):
+        if self.db is None:
+            return
+        try:
+            self.db["giveaway_claims"].create_index([("claim_channel_id", 1)])
+            self.db["giveaway_claims"].create_index([("giveaway_message_id", 1)])
+            self.db["giveaway_claims"].create_index([("user_id", 1)])
+            self.db["giveaway_claims"].create_index([("paid", 1)])
+        except Exception as e:
+            print(f"❌ Failed to create claim indexes: {e}")
+    
+    def create_claim(self, user_id: int, mc_ign: str, claim_channel_id: int, 
+                     giveaway_message_id: int, giveaway_data: dict) -> str:
+        """Create a new claim record."""
+        doc = {
+            "user_id": user_id,
+            "mc_ign": mc_ign,
+            "claim_channel_id": claim_channel_id,
+            "giveaway_message_id": giveaway_message_id,
+            "paid": False,
+            "paid_at": None,
+            "paid_by": None,
+            "payment_amount": None,
+            "created_at": datetime.utcnow(),
+            "giveaway_data": {
+                "title": giveaway_data.get("title"),
+                "prize": giveaway_data.get("prize"),
+                "winners_count": giveaway_data.get("winners_count"),
+                "channel_id": giveaway_data.get("channel_id"),
+            }
+        }
+        try:
+            result = self.db["giveaway_claims"].insert_one(doc)
+            return str(result.inserted_id)
+        except Exception as e:
+            print(f"❌ Failed to create claim: {e}")
+            return None
+    
+    def get_claim_by_channel(self, channel_id: int) -> Optional[dict]:
+        """Get claim by claim channel ID."""
+        try:
+            return self.db["giveaway_claims"].find_one({"claim_channel_id": channel_id})
+        except Exception as e:
+            print(f"❌ Failed to fetch claim: {e}")
+            return None
+    
+    def get_claims_for_giveaway(self, giveaway_message_id: int) -> List[dict]:
+        """Get all claims for a giveaway."""
+        try:
+            return list(self.db["giveaway_claims"].find(
+                {"giveaway_message_id": giveaway_message_id}
+            ))
+        except Exception as e:
+            print(f"❌ Failed to fetch claims: {e}")
+            return []
+    
+    def get_unpaid_claims_for_giveaway(self, giveaway_message_id: int) -> List[dict]:
+        """Get unpaid claims for a giveaway."""
+        try:
+            return list(self.db["giveaway_claims"].find({
+                "giveaway_message_id": giveaway_message_id,
+                "paid": False
+            }))
+        except Exception as e:
+            print(f"❌ Failed to fetch unpaid claims: {e}")
+            return []
+    
+    def get_all_unpaid_claims(self) -> List[dict]:
+        """Get all unpaid claims across all giveaways."""
+        try:
+            return list(self.db["giveaway_claims"].find({"paid": False}))
+        except Exception as e:
+            print(f"❌ Failed to fetch unpaid claims: {e}")
+            return []
+    
+    def mark_paid(self, claim_id: str, paid_by: int, amount: str) -> bool:
+        """Mark a claim as paid."""
+        try:
+            result = self.db["giveaway_claims"].update_one(
+                {"_id": ObjectId(claim_id)},
+                {"$set": {
+                    "paid": True,
+                    "paid_at": datetime.utcnow(),
+                    "paid_by": paid_by,
+                    "payment_amount": amount
+                }}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            print(f"❌ Failed to mark claim paid: {e}")
+            return False
+    
+    def get_claim_by_id(self, claim_id: str) -> Optional[dict]:
+        """Get claim by its ID."""
+        try:
+            return self.db["giveaway_claims"].find_one({"_id": ObjectId(claim_id)})
+        except Exception as e:
+            print(f"❌ Failed to fetch claim: {e}")
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +613,27 @@ class WinnerClaimView(discord.ui.View):
             giveaway_obj.claim_channels[str(winner_id)] = ticket.id
             self.giveaway_data.add_giveaway(self.giveaway_message_id, giveaway_obj)
 
+        # --- STORE THE CLAIM IN MONGODB ---
+        claim_id = None
+        if self.giveaway_data.db is not None:
+            giveaway_obj = self.giveaway_data.active_giveaways.get(self.giveaway_message_id)
+            if giveaway_obj:
+                claim_manager = ClaimManager(self.giveaway_data.db)
+                claim_id = claim_manager.create_claim(
+                    user_id=winner_id,
+                    mc_ign=mc_ign or "N/A",
+                    claim_channel_id=ticket.id,
+                    giveaway_message_id=self.giveaway_message_id,
+                    giveaway_data={
+                        "title": giveaway_obj.title,
+                        "prize": giveaway_obj.prize,
+                        "winners_count": giveaway_obj.winners_count,
+                        "channel_id": self.giveaway_channel_id,
+                    }
+                )
+                if claim_id:
+                    print(f"[CLAIM] Created claim {claim_id} for winner {winner_id}")
+
         await interaction.followup.send(
             f"✅ Claim ticket created: {ticket.mention}", ephemeral=True
         )
@@ -554,6 +688,7 @@ class Giveaways(commands.Cog):
         self.bot = bot
         self.giveaway_data = GiveawayData(self.bot.db)
         self.sponsors = GiveawaySponsors(self.bot.db)
+        self.claim_manager = ClaimManager(self.bot.db) if self.bot.db else None
 
         for msg_id, giveaway in self.giveaway_data.active_giveaways.items():
             if not giveaway.ended:

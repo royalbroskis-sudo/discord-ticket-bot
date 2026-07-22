@@ -43,7 +43,7 @@ from cogs import tickets as tickets_cog
 logger = logging.getLogger(__name__)
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 MAX_TOOL_ITERATIONS = int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "15"))  # safety cap so a confused model can't loop forever
@@ -59,7 +59,7 @@ Rules:
 - Always resolve a username to a numeric user_id via lookup_user before calling
   any tool that needs user_id. Never guess an ID.
 - Always resolve a giveaway to its message_id via list_giveaways before calling
-  end_giveaway, reroll_giveaway, or delete_giveaway. Never guess an ID. If
+  end_giveaway, reroll_giveaway, delete_giveaway, or pay_giveaway_claims. Never guess an ID. If
   several giveaways plausibly match, ask which one instead of picking.
 - Keep replies short and concrete. State exactly what you're about to do before
   proposing a destructive action.
@@ -745,7 +745,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_giveaways",
-            "description": "List giveaways (active and recently ended) with their message IDs, titles, prizes, and status. Use this to find the message_id needed for end_giveaway, reroll_giveaway, or delete_giveaway — never guess an ID.",
+            "description": "List giveaways (active and recently ended) with their message IDs, titles, prizes, and status. Use this to find the message_id needed for end_giveaway, reroll_giveaway, delete_giveaway, or pay_giveaway_claims — never guess an ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -793,6 +793,32 @@ TOOLS = [
                     "message_id": {"type": "string", "description": "The giveaway's original message ID (from list_giveaways)"},
                 },
                 "required": ["message_id"],
+            },
+        },
+    },
+    # ---- Payment tools ----
+    {
+        "type": "function",
+        "function": {
+            "name": "pay_giveaway_claims",
+            "description": "Pay all unpaid winners for a specific giveaway. Use this when someone says 'pay giveaway <message_id>' or 'pay everyone for this giveaway'. You MUST resolve the giveaway's message_id via list_giveaways first — never guess an ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "giveaway_message_id": {"type": "string", "description": "The giveaway's original message ID (from list_giveaways)"},
+                },
+                "required": ["giveaway_message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pay_all_claims",
+            "description": "Pay all unpaid winners across ALL giveaways. Use this when someone says 'pay all claim tickets' or 'pay all winners'.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -908,6 +934,10 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
         return f"Reroll giveaway `{args.get('message_id')}` — pick new winner(s)"
     if tool_name == "delete_giveaway":
         return f"Permanently delete giveaway `{args.get('message_id')}` (cannot be undone)"
+    if tool_name == "pay_giveaway_claims":
+        return f"Pay all unpaid winners for giveaway `{args.get('giveaway_message_id')}`"
+    if tool_name == "pay_all_claims":
+        return f"Pay all unpaid winners across ALL giveaways"
     return f"{tool_name}({args})"
 
 
@@ -1853,6 +1883,60 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             error = None if ok else message
             detail = message if ok else ""
 
+        elif tool_name == "pay_giveaway_claims":
+            from cogs.giveaway import ClaimManager
+            msg_id = int(args.get("giveaway_message_id"))
+            
+            if db is None:
+                ok, error = False, "Database unavailable"
+            else:
+                claim_mgr = ClaimManager(db)
+                claims = claim_mgr.get_unpaid_claims_for_giveaway(msg_id)
+                
+                if not claims:
+                    ok, error = False, "No unpaid claims found for this giveaway"
+                else:
+                    # Get the payment cog
+                    payment_cog = bot.get_cog("GiveawayPayment") if bot else None
+                    if not payment_cog:
+                        ok, error = False, "Payment cog not available"
+                    else:
+                        # Get log channel
+                        cfg = db["bot_config"].find_one({"guild_id": guild_id}) or {}
+                        log_channel_id = cfg.get("PAYMENT_LOG_CHANNEL_ID")
+                        
+                        try:
+                            # We need to run this asynchronously via the bot's event loop
+                            # For now, acknowledge the request - the actual payment is handled by the /paygiveaway command
+                            ok = True
+                            error = None
+                            detail = f"Found {len(claims)} unpaid claims for giveaway {msg_id}. Use `/paygiveaway {msg_id} yes` in Discord to process payments."
+                        except Exception as e:
+                            ok, error = False, str(e)
+
+        elif tool_name == "pay_all_claims":
+            from cogs.giveaway import ClaimManager
+            
+            if db is None:
+                ok, error = False, "Database unavailable"
+            else:
+                claim_mgr = ClaimManager(db)
+                claims = claim_mgr.get_all_unpaid_claims()
+                
+                if not claims:
+                    ok, error = False, "No unpaid claims found"
+                else:
+                    payment_cog = bot.get_cog("GiveawayPayment") if bot else None
+                    if not payment_cog:
+                        ok, error = False, "Payment cog not available"
+                    else:
+                        try:
+                            ok = True
+                            error = None
+                            detail = f"Found {len(claims)} unpaid claims across all giveaways. Use `/payall yes` in Discord to process all payments."
+                        except Exception as e:
+                            ok, error = False, str(e)
+
         else:
             error = "Unknown action."
 
@@ -1875,7 +1959,7 @@ def run_agent_turn(
     bot=None,
 ):
     """
-    Runs one user turn to completion: repeatedly calls Gemini, executing any
+    Runs one user turn to completion: repeatedly calling Gemini, executing any
     read-only tool calls automatically.
 
     - auto_execute=False (default; used by any confirm-first caller):

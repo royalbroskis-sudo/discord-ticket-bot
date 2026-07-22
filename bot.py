@@ -27,8 +27,9 @@ COGS = [
     'cogs.tickets',
     'cogs.moderation',
     'cogs.giveaway',
+    'cogs.giveaway_payment',  # <-- ADDED: Payment system
     'cogs.sticky',
-    'cogs.building',            # new building system
+    'cogs.building',
     'cogs.reactionroles',
     'cogs.welcome',
     'cogs.automod',
@@ -37,13 +38,12 @@ COGS = [
     'cogs.applications',
     'cogs.staff_utils',
     'cogs.afk',
-    'cogs.mc_link',        # per-user Minecraft account linking (/link, /unlink, /mc)
+    'cogs.mc_link',
     'cogs.invites',
-    'cogs.embed_activity',  # /embed sender + /activity presence setter
-    'cogs.promotion',       # /promote and /demote (Helper -> Mod -> Admin)
-    'cogs.ai_chat',         # conversational AI — replies on @mention or reply-to-bot
-    'cogs.ai_automod',      # autonomous AI moderation — off by default, /aimod enable to turn on
-
+    'cogs.embed_activity',
+    'cogs.promotion',
+    'cogs.ai_chat',
+    'cogs.ai_automod',
 ]
 
 class Bot(commands.Bot):

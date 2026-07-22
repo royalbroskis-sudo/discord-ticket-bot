@@ -355,7 +355,6 @@
                     <span class="helper-text">Shown in the payment embed when a ticket is opened.</span>
                 </div>
 
-                <!-- NEW: Payment Receiver IGN -->
                 <div class="form-group">
                     <label>Payment Receiver IGN (in‑game name that receives payments)</label>
                     <input type="text" name="PAYMENT_RECEIVER_IGN" 
@@ -364,7 +363,7 @@
                     <span class="helper-text">The IGN that buyers must pay to. The bot will check the DonutSMP API for incoming payments to this player.</span>
                 </div>
 
-                <!-- NEW: Payment Log Channel -->
+                <!-- PAYMENT LOG CHANNEL -->
                 <div class="form-group">
                     <label>Payment Log Channel</label>
                     <select name="PAYMENT_LOG_CHANNEL_ID">
@@ -373,7 +372,7 @@
                         <option value="{{ channel.id }}" {% if settings.building.config and settings.building.config.PAYMENT_LOG_CHANNEL_ID and settings.building.config.PAYMENT_LOG_CHANNEL_ID|int == channel.id|int %}selected{% endif %}># {{ channel.name }}</option>
                         {% endfor %}
                     </select>
-                    <span class="helper-text">When a payment is confirmed, the bot will send a log message here.</span>
+                    <span class="helper-text">When a giveaway payment is processed, the bot will send a log message here.</span>
                 </div>
                 
                 <button type="submit">Save Roles, Pings & Payment Settings</button>
