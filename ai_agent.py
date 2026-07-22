@@ -1885,13 +1885,15 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
 
         elif tool_name == "pay_giveaway_claims":
             from cogs.giveaway import ClaimManager
-            msg_id = int(args.get("giveaway_message_id"))
             
-            if db is None:
+            msg_id = args.get("giveaway_message_id")
+            if not msg_id:
+                ok, error = False, "Missing giveaway_message_id"
+            elif db is None:
                 ok, error = False, "Database unavailable"
             else:
                 claim_mgr = ClaimManager(db)
-                claims = claim_mgr.get_unpaid_claims_for_giveaway(msg_id)
+                claims = claim_mgr.get_unpaid_claims_for_giveaway(int(msg_id))
                 
                 if not claims:
                     ok, error = False, "No unpaid claims found for this giveaway"
@@ -1901,18 +1903,33 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                     if not payment_cog:
                         ok, error = False, "Payment cog not available"
                     else:
-                        # Get log channel
-                        cfg = db["bot_config"].find_one({"guild_id": guild_id}) or {}
-                        log_channel_id = cfg.get("PAYMENT_LOG_CHANNEL_ID")
-                        
                         try:
-                            # We need to run this asynchronously via the bot's event loop
-                            # For now, acknowledge the request - the actual payment is handled by the /paygiveaway command
-                            ok = True
-                            error = None
-                            detail = f"Found {len(claims)} unpaid claims for giveaway {msg_id}. Use `/paygiveaway {msg_id} yes` in Discord to process payments."
+                            # Run the async method on the bot's event loop
+                            if bot and bot.loop and bot.loop.is_running():
+                                # Get the discord_id from actor_name if it's a user ID
+                                discord_id = int(actor_name) if actor_name and actor_name.isdigit() else None
+                                
+                                future = asyncio.run_coroutine_threadsafe(
+                                    payment_cog.pay_giveaway(
+                                        guild_id=guild_id,
+                                        discord_id=discord_id,
+                                        giveaway_message_id=msg_id,
+                                        requester_name=actor_name
+                                    ),
+                                    bot.loop
+                                )
+                                success, message, paid_count, failed_count = future.result(timeout=120)
+                                ok = success
+                                error = None if success else message
+                                detail = f"Paid {paid_count} winners, {failed_count} failed"
+                            else:
+                                ok, error = False, "Bot event loop not available"
+                        except asyncio.TimeoutError:
+                            ok, error = False, "Payment processing timed out"
                         except Exception as e:
-                            ok, error = False, str(e)
+                            logger.error(f"pay_giveaway_claims failed: {e}")
+                            ok, error = False, str(e)[:300]
+                            detail = ""
 
         elif tool_name == "pay_all_claims":
             from cogs.giveaway import ClaimManager
@@ -1931,11 +1948,29 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                         ok, error = False, "Payment cog not available"
                     else:
                         try:
-                            ok = True
-                            error = None
-                            detail = f"Found {len(claims)} unpaid claims across all giveaways. Use `/payall yes` in Discord to process all payments."
+                            if bot and bot.loop and bot.loop.is_running():
+                                discord_id = int(actor_name) if actor_name and actor_name.isdigit() else None
+                                
+                                future = asyncio.run_coroutine_threadsafe(
+                                    payment_cog.pay_all_claims(
+                                        guild_id=guild_id,
+                                        discord_id=discord_id,
+                                        requester_name=actor_name
+                                    ),
+                                    bot.loop
+                                )
+                                success, message, paid_count, failed_count = future.result(timeout=120)
+                                ok = success
+                                error = None if success else message
+                                detail = f"Paid {paid_count} winners across all giveaways, {failed_count} failed"
+                            else:
+                                ok, error = False, "Bot event loop not available"
+                        except asyncio.TimeoutError:
+                            ok, error = False, "Payment processing timed out"
                         except Exception as e:
-                            ok, error = False, str(e)
+                            logger.error(f"pay_all_claims failed: {e}")
+                            ok, error = False, str(e)[:300]
+                            detail = ""
 
         else:
             error = "Unknown action."

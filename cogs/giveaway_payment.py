@@ -2,6 +2,7 @@
 cogs/giveaway_payment.py
 
 AI-assisted payment system for giveaway claims.
+This is called by the AI agent, NOT by slash commands.
 """
 
 import asyncio
@@ -9,12 +10,11 @@ import math
 import re
 import discord
 from discord.ext import commands
-from discord import app_commands
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 import logging
 
-from cogs.config import admin_only, get_guild_config, is_admin_user, is_staff_user
+from cogs.config import get_guild_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +27,14 @@ class PaymentManager:
         """
         Calculate each winner's payout.
         
-        Prize examples: "50m", "100M", "1.2b", "500k"
+        Prize examples: "50m", "100M", "1.2b", "500k", "10k"
         Winners: 5 -> each gets 10m
+        Winners: 1 -> each gets 50m
         """
         # Parse the prize amount
         prize = str(prize).strip().lower()
         
-        # Extract number and unit
+        # Extract number and unit - handle decimal numbers too
         match = re.match(r"([\d.]+)\s*([kkmb]?)", prize)
         if not match:
             return prize  # Can't parse, return as-is
@@ -58,8 +59,15 @@ class PaymentManager:
         if per_winner >= 1000:
             return f"{per_winner/1000:.1f}b"
         elif per_winner >= 1:
-            return f"{per_winner:.1f}m"
+            # For values between 1 and 999, show as millions
+            # But if the original was in "k" and per_winner is small, show as k
+            if unit == "k" and per_winner < 1:
+                # Show as k
+                return f"{per_winner * 1000:.1f}k"
+            else:
+                return f"{per_winner:.1f}m"
         else:
+            # Show as k for small amounts
             return f"{per_winner * 1000:.1f}k"
 
 
@@ -158,7 +166,7 @@ class GiveawayPayment(commands.Cog):
         discord_id: int,
         claims: List[dict],
         log_channel_id: int = None,
-        requester: discord.Member = None,
+        requester_name: str = "AI",
         guild: discord.Guild = None
     ) -> Tuple[List[dict], List[dict]]:
         """
@@ -228,7 +236,7 @@ class GiveawayPayment(commands.Cog):
                 # Log payment
                 await self.log_payment(
                     log_channel,
-                    requester,
+                    requester_name,
                     discord_id,
                     claim,
                     amount,
@@ -248,7 +256,7 @@ class GiveawayPayment(commands.Cog):
     async def log_payment(
         self,
         channel: discord.TextChannel,
-        requester: discord.Member,
+        requester_name: str,
         bot_discord_id: int,
         claim: dict,
         amount: str,
@@ -257,6 +265,7 @@ class GiveawayPayment(commands.Cog):
     ):
         """Log a payment to the configured channel."""
         if not channel:
+            logger.warning(f"Payment log channel not found or disabled")
             return
         
         try:
@@ -271,7 +280,7 @@ class GiveawayPayment(commands.Cog):
                 timestamp=datetime.utcnow()
             )
             
-            embed.add_field(name="Paid By", value=f"<@{requester.id}>" if requester else "Unknown", inline=True)
+            embed.add_field(name="Paid By", value=requester_name, inline=True)
             embed.add_field(name="Minecraft Account", value=f"<@{bot_discord_id}>" if bot_discord_id else "Unknown", inline=True)
             
             winner_id = claim.get("user_id")
@@ -293,109 +302,68 @@ class GiveawayPayment(commands.Cog):
         except Exception as e:
             logger.error(f"Failed to log payment: {e}")
     
-    # ── Slash Commands ──────────────────────────────────────────────────────────
-    
-    @app_commands.command(name="paygiveaway", description="Pay all unpaid winners for a giveaway")
-    @app_commands.describe(
-        giveaway_id="The message ID of the giveaway to pay",
-        confirm="Type 'yes' to confirm you want to process payments"
-    )
-    @admin_only()
-    async def pay_giveaway(self, interaction: discord.Interaction, giveaway_id: str, confirm: str = "no"):
-        """Pay all unpaid winners for a specific giveaway."""
-        if confirm.lower() != "yes":
-            await interaction.response.send_message(
-                "⚠️ This will pay real money/items to winners. Type `confirm: yes` to proceed.",
-                ephemeral=True
-            )
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
+    async def pay_giveaway(self, guild_id: int, discord_id: int, giveaway_message_id: int, requester_name: str = "AI") -> Tuple[bool, str, int, int]:
+        """
+        Pay all unpaid winners for a specific giveaway.
+        Returns (success, message, paid_count, failed_count)
+        """
         if self.claim_manager is None:
-            await interaction.followup.send("❌ Database unavailable.", ephemeral=True)
-            return
+            return False, "Database unavailable", 0, 0
         
         try:
-            msg_id = int(giveaway_id)
+            msg_id = int(giveaway_message_id)
         except ValueError:
-            await interaction.followup.send("❌ Invalid giveaway ID.", ephemeral=True)
-            return
+            return False, "Invalid giveaway ID", 0, 0
         
         claims = self.claim_manager.get_unpaid_claims_for_giveaway(msg_id)
         
         if not claims:
-            await interaction.followup.send("❌ No unpaid claims found for this giveaway.", ephemeral=True)
-            return
+            return False, "No unpaid claims found for this giveaway", 0, 0
         
         # Get log channel
-        cfg = get_guild_config(self.bot.db, interaction.guild.id)
+        cfg = get_guild_config(self.bot.db, guild_id)
         log_channel_id = cfg.get("PAYMENT_LOG_CHANNEL_ID")
         
+        guild = self.bot.get_guild(guild_id)
+        
         successful, failed = await self.process_claims(
-            discord_id=interaction.user.id,
+            discord_id=discord_id,
             claims=claims,
             log_channel_id=log_channel_id,
-            requester=interaction.user,
-            guild=interaction.guild
+            requester_name=requester_name,
+            guild=guild
         )
         
-        summary = f"✅ Paid {len(successful)} winners"
-        if failed:
-            summary += f"\n❌ Failed: {len(failed)} claims"
-        
-        await interaction.followup.send(summary, ephemeral=True)
+        return True, f"Paid {len(successful)} winners, {len(failed)} failed", len(successful), len(failed)
     
-    @app_commands.command(name="payall", description="Pay all unpaid winners across ALL giveaways")
-    @app_commands.describe(
-        confirm="Type 'yes' to confirm you want to process ALL payments"
-    )
-    @admin_only()
-    async def pay_all(self, interaction: discord.Interaction, confirm: str = "no"):
-        """Pay all unpaid winners across ALL giveaways."""
-        if confirm.lower() != "yes":
-            await interaction.response.send_message(
-                "⚠️ This will pay ALL unpaid winners across ALL giveaways. Type `confirm: yes` to proceed.",
-                ephemeral=True
-            )
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
+    async def pay_all_claims(self, guild_id: int, discord_id: int, requester_name: str = "AI") -> Tuple[bool, str, int, int]:
+        """
+        Pay all unpaid winners across ALL giveaways.
+        Returns (success, message, paid_count, failed_count)
+        """
         if self.claim_manager is None:
-            await interaction.followup.send("❌ Database unavailable.", ephemeral=True)
-            return
+            return False, "Database unavailable", 0, 0
         
         claims = self.claim_manager.get_all_unpaid_claims()
         
         if not claims:
-            await interaction.followup.send("❌ No unpaid claims found.", ephemeral=True)
-            return
+            return False, "No unpaid claims found", 0, 0
         
         # Get log channel
-        cfg = get_guild_config(self.bot.db, interaction.guild.id)
+        cfg = get_guild_config(self.bot.db, guild_id)
         log_channel_id = cfg.get("PAYMENT_LOG_CHANNEL_ID")
         
+        guild = self.bot.get_guild(guild_id)
+        
         successful, failed = await self.process_claims(
-            discord_id=interaction.user.id,
+            discord_id=discord_id,
             claims=claims,
             log_channel_id=log_channel_id,
-            requester=interaction.user,
-            guild=interaction.guild
+            requester_name=requester_name,
+            guild=guild
         )
         
-        summary = f"✅ Paid {len(successful)} winners across all giveaways"
-        if failed:
-            summary += f"\n❌ Failed: {len(failed)} claims"
-        
-        await interaction.followup.send(summary, ephemeral=True)
-    
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Set up the claim manager when ready."""
-        if self.bot.db is not None and self.claim_manager is None:
-            from cogs.giveaway import ClaimManager
-            self.claim_manager = ClaimManager(self.bot.db)
+        return True, f"Paid {len(successful)} winners across all giveaways, {len(failed)} failed", len(successful), len(failed)
 
 
 async def setup(bot: commands.Bot):
