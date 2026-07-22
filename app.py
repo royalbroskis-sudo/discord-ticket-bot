@@ -41,6 +41,20 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 BOT_TOKEN = get_bot_token()
 
+# Live discord.py Bot instance, wired up by bot.py right after it constructs
+# the bot (see bot.py: `app.set_discord_bot(bot)`). Flask runs in its own
+# thread (see bot.py's run_web()), so this is the only way the dashboard's
+# AI agent can reach real discord.py objects (needed for giveaway actions —
+# see ai_agent.py's _run_on_bot_loop) instead of talking over raw REST like
+# everything else here does.
+_DISCORD_BOT = None
+
+
+def set_discord_bot(bot_instance):
+    global _DISCORD_BOT
+    _DISCORD_BOT = bot_instance
+
+
 # Connect to MongoDB (shared singleton with the bot)
 db = get_db()
 
@@ -1610,7 +1624,7 @@ def bot_agent_chat(guild_id):
         return jsonify({"ok": False, "error": "Empty message."}), 400
 
     try:
-        result = ai_agent.run_agent_turn(guild_id, history, user_message, _discord_api, db)
+        result = ai_agent.run_agent_turn(guild_id, history, user_message, _discord_api, db, bot=_DISCORD_BOT)
     except Exception as e:
         logger.error(f"Agent turn failed for guild {guild_id}: {e}")
         return jsonify({"ok": False, "error": f"Agent error: {e}"}), 500
@@ -1640,7 +1654,7 @@ def bot_agent_execute(guild_id):
 
     try:
         ok, error, detail = ai_agent._run_destructive_tool(
-            tool, args, guild_id, _discord_api, db=db, actor_name=actor_name
+            tool, args, guild_id, _discord_api, db=db, actor_name=actor_name, bot=_DISCORD_BOT
         )
     except Exception as e:
         logger.error(f"Agent execute '{tool}' failed: {e}")

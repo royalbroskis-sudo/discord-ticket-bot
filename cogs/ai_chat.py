@@ -158,6 +158,7 @@ class AIChat(commands.Cog):
                             auto_execute=True,
                             log_action=self._log_action(message.guild.id, message.author),
                             actor_name=str(message.author),
+                            bot=self.bot,
                         ),
                     )
                     reply = result["reply"]

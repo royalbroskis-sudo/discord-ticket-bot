@@ -32,6 +32,7 @@ import os
 import json
 import logging
 import time
+import asyncio
 import requests
 
 from personality import PERSONALITY
@@ -57,6 +58,9 @@ read-only tool to look something up, or propose a moderation/action tool call.
 Rules:
 - Always resolve a username to a numeric user_id via lookup_user before calling
   any tool that needs user_id. Never guess an ID.
+- Always resolve a giveaway to its message_id via list_giveaways before calling
+  end_giveaway, reroll_giveaway, or delete_giveaway. Never guess an ID. If
+  several giveaways plausibly match, ask which one instead of picking.
 - Keep replies short and concrete. State exactly what you're about to do before
   proposing a destructive action.
 - If a request is ambiguous (e.g. which of several matching users), ask a short
@@ -737,11 +741,66 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_giveaways",
+            "description": "List giveaways (active and recently ended) with their message IDs, titles, prizes, and status. Use this to find the message_id needed for end_giveaway, reroll_giveaway, or delete_giveaway — never guess an ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Optional title/prize substring to filter by"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "end_giveaway",
+            "description": "Force-end an active giveaway early and announce the winner(s).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The giveaway's original message ID (from list_giveaways)"},
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reroll_giveaway",
+            "description": "Reroll a giveaway that has already ended, picking new winner(s) from the remaining entries. Fails if any winner has already opened a claim ticket.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The giveaway's original message ID (from list_giveaways)"},
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_giveaway",
+            "description": "Permanently delete a giveaway — removes the giveaway/winner messages and its database entry. Cannot be undone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The giveaway's original message ID (from list_giveaways)"},
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
 ]
 
 READ_ONLY_TOOLS = {
     "lookup_user", "list_channels", "list_roles", "summarize_channel", "list_warnings",
-    "server_stats", "member_insights", "get_audit_log", "list_invites",
+    "server_stats", "member_insights", "get_audit_log", "list_invites", "list_giveaways",
 }
 DESTRUCTIVE_TOOLS = {t["function"]["name"] for t in TOOLS} - READ_ONLY_TOOLS
 
@@ -843,6 +902,12 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
         return f"Add user `{uid}` to ticket `{args.get('channel_id')}`"
     if tool_name == "remove_user_from_ticket":
         return f"Remove user `{uid}` from ticket `{args.get('channel_id')}`"
+    if tool_name == "end_giveaway":
+        return f"Force-end giveaway `{args.get('message_id')}` and announce winner(s)"
+    if tool_name == "reroll_giveaway":
+        return f"Reroll giveaway `{args.get('message_id')}` — pick new winner(s)"
+    if tool_name == "delete_giveaway":
+        return f"Permanently delete giveaway `{args.get('message_id')}` (cannot be undone)"
     return f"{tool_name}({args})"
 
 
@@ -907,6 +972,35 @@ def _snowflake_to_datetime(snowflake):
         return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     except (TypeError, ValueError):
         return datetime.now(timezone.utc)
+
+
+GIVEAWAY_ACTION_TIMEOUT = 20  # seconds — generous, but bounded so a hung request can't wedge the dashboard thread forever
+
+
+def _run_on_bot_loop(bot, coro):
+    """Runs a coroutine on the live discord.py bot's event loop from
+    whatever thread called us (the Flask dashboard runs in its own thread —
+    see bot.py's run_web()), and blocks for the result.
+
+    Needed specifically for giveaway actions: unlike every other tool here,
+    which talks to Discord purely over REST, giveaways rely on real
+    discord.py View objects (persistent Claim buttons) living in the bot's
+    process, so we have to call into the actual Giveaways cog rather than
+    re-implement it — see cogs/giveaway.py's *_action methods.
+
+    Raises RuntimeError if no live bot is wired up (e.g. local/dev runs of
+    the dashboard without the bot process)."""
+    if bot is None or getattr(bot, "loop", None) is None or not bot.loop.is_running():
+        raise RuntimeError("The Discord bot isn't connected right now — try again in a moment.")
+    future = asyncio.run_coroutine_threadsafe(coro, bot.loop)
+    return future.result(timeout=GIVEAWAY_ACTION_TIMEOUT)
+
+
+def _get_giveaways_cog(bot):
+    cog = bot.get_cog("Giveaways") if bot else None
+    if cog is None:
+        raise RuntimeError("The Giveaways cog isn't loaded.")
+    return cog
 
 
 class _ChannelShim:
@@ -992,7 +1086,7 @@ def _parse_ticket_topic(topic: str) -> tuple[str, str]:
 # Read-only tool implementations — need guild_id + the discord_api callable
 # ---------------------------------------------------------------------------
 
-def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, db):
+def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, db, bot=None):
     try:
         if tool_name == "lookup_user":
             query = (args.get("query") or "").lower()
@@ -1169,6 +1263,27 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
                 ]
             }
 
+        elif tool_name == "list_giveaways":
+            cog = _get_giveaways_cog(bot)
+            query = (args.get("query") or "").lower()
+            giveaways = []
+            for msg_id, g in cog.giveaway_data.active_giveaways.items():
+                if query and query not in g.title.lower() and query not in g.prize.lower():
+                    continue
+                giveaways.append({
+                    "message_id": str(msg_id),
+                    "display_id": g.display_id,
+                    "title": g.title,
+                    "prize": g.prize,
+                    "channel_id": str(g.channel_id),
+                    "status": "Ended" if g.ended else "Active",
+                    "winners_count": g.winners_count,
+                    "entries": len(g.entries),
+                    "winners": [str(w) for w in g.winners] if g.ended else [],
+                    "claimed_users": [str(u) for u in g.claimed_users],
+                })
+            return {"giveaways": giveaways}
+
     except Exception as e:
         logger.error(f"Agent read-only tool '{tool_name}' failed: {e}")
         return {"error": str(e)[:300]}
@@ -1215,14 +1330,20 @@ def simple_chat(messages: list, temperature: float = 0.7, max_tokens: int = 600)
     return data["choices"][0]["message"]["content"] or "..."
 
 
-def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api, db=None, actor_name: str = "AI"):
+def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api, db=None, actor_name: str = "AI", bot=None):
     """Actually performs a destructive action via the Discord REST API.
     Shared by app.py's dashboard confirm-execute route and the trusted-staff
     auto-execute path used from Discord chat (cogs/ai_chat.py).
 
     `db` is only needed for the warning tools (they write to the `warnings`
     collection directly, same shape list_warnings reads). `actor_name` is
-    recorded as the "mod" on new warning entries."""
+    recorded as the "mod" on new warning entries.
+
+    `bot` is only needed for the giveaway tools — unlike everything else
+    here, which talks to Discord purely over REST, giveaways rely on real
+    discord.py View objects (persistent Claim buttons), so those three
+    tools call into the live Giveaways cog (see _run_on_bot_loop) instead
+    of re-implementing it over REST."""
     from datetime import datetime, timedelta  # local import to avoid a hard dep for read-only-only callers
 
     user_id = str(args.get("user_id", "") or "")
@@ -1711,6 +1832,27 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                     error = None if ok else f"HTTP {r.status_code}: {r.text[:200]}"
                     detail = f"user {user_id} removed from ticket {channel_id}"
 
+        elif tool_name == "end_giveaway":
+            msg_id = int(args.get("message_id"))
+            cog = _get_giveaways_cog(bot)
+            ok, message = _run_on_bot_loop(bot, cog.end_giveaway_action(msg_id))
+            error = None if ok else message
+            detail = message if ok else ""
+
+        elif tool_name == "reroll_giveaway":
+            msg_id = int(args.get("message_id"))
+            cog = _get_giveaways_cog(bot)
+            ok, message, _new_winners = _run_on_bot_loop(bot, cog.reroll_giveaway_action(msg_id))
+            error = None if ok else message
+            detail = message if ok else ""
+
+        elif tool_name == "delete_giveaway":
+            msg_id = int(args.get("message_id"))
+            cog = _get_giveaways_cog(bot)
+            ok, message = _run_on_bot_loop(bot, cog.delete_giveaway_action(msg_id))
+            error = None if ok else message
+            detail = message if ok else ""
+
         else:
             error = "Unknown action."
 
@@ -1730,6 +1872,7 @@ def run_agent_turn(
     auto_execute: bool = False,
     log_action=None,
     actor_name: str = "AI",
+    bot=None,
 ):
     """
     Runs one user turn to completion: repeatedly calls Gemini, executing any
@@ -1801,7 +1944,7 @@ def run_agent_turn(
                 return {"reply": reply, "history": messages[1:], "pending_action": pending}
 
             if name in DESTRUCTIVE_TOOLS:  # auto_execute is True here
-                ok, error, detail = _run_destructive_tool(name, args, guild_id, discord_api, db=db, actor_name=actor_name)
+                ok, error, detail = _run_destructive_tool(name, args, guild_id, discord_api, db=db, actor_name=actor_name, bot=bot)
                 if log_action:
                     try:
                         log_action(name, args, ok, error, detail)
@@ -1814,7 +1957,7 @@ def run_agent_turn(
                     line += f" — failed: {error}"
                 completed_log.append(line)
             else:
-                result = _run_read_only_tool(name, args, guild_id, discord_api, db)
+                result = _run_read_only_tool(name, args, guild_id, discord_api, db, bot=bot)
 
             messages.append({
                 "role": "tool",

@@ -872,6 +872,19 @@ class Giveaways(commands.Cog):
                 choices.append(app_commands.Choice(name=label, value=str(msg_id)))
         return choices[:25]
 
+    async def end_giveaway_action(self, msg_id: int) -> tuple[bool, str]:
+        """Validation + call shared by the /giveaway end slash command and
+        the AI agent. Returns (success, message)."""
+        if msg_id not in self.giveaway_data.active_giveaways:
+            return False, "Giveaway not found or already ended!"
+
+        giveaway = self.giveaway_data.active_giveaways[msg_id]
+        if giveaway.ended:
+            return False, "This giveaway has already ended!"
+
+        await self.end_giveaway(msg_id, giveaway)
+        return True, "Giveaway ended!"
+
     @giveaway_group.command(name="end", description="Force end a giveaway early")
     @app_commands.describe(message_id="The giveaway to end")
     @admin_only()
@@ -881,64 +894,40 @@ class Giveaways(commands.Cog):
             await interaction.response.send_message("❌ Invalid message ID!", ephemeral=True)
             return
 
-        if msg_id not in self.giveaway_data.active_giveaways:
-            await interaction.response.send_message("❌ Giveaway not found or already ended!", ephemeral=True)
-            return
-
-        giveaway = self.giveaway_data.active_giveaways[msg_id]
-        if giveaway.ended:
-            await interaction.response.send_message("❌ This giveaway has already ended!", ephemeral=True)
-            return
-
-        await self.end_giveaway(msg_id, giveaway)
-        await interaction.response.send_message("✅ Giveaway ended!", ephemeral=True)
+        ok, message = await self.end_giveaway_action(msg_id)
+        await interaction.response.send_message(f"{'✅' if ok else '❌'} {message}", ephemeral=True)
 
     @end_giveaway_early.autocomplete("message_id")
     async def end_giveaway_early_autocomplete(self, interaction: discord.Interaction, current: str):
         return await self._giveaway_autocomplete(current)
 
-    @giveaway_group.command(name="reroll", description="Reroll a giveaway winner")
-    @app_commands.describe(message_id="The giveaway to reroll")
-    @admin_only()
-    async def reroll_giveaway(self, interaction: discord.Interaction, message_id: str):
-        await interaction.response.defer()
-
-        try: msg_id = int(message_id)
-        except ValueError:
-            await interaction.followup.send("❌ Invalid message ID!", ephemeral=True)
-            return
-
+    async def reroll_giveaway_action(self, msg_id: int) -> tuple[bool, str, list]:
+        """Does the actual reroll work — shared by the /giveaway reroll slash
+        command and the AI agent (cogs/ai_agent.py) so both take the exact
+        same path and use the exact same (current) embed style.
+        Returns (success, message, new_winner_ids)."""
         if msg_id not in self.giveaway_data.active_giveaways:
-            await interaction.followup.send("❌ Giveaway not found! Make sure you are using the **original** giveaway message ID, not the winner announcement ID.", ephemeral=True)
-            return
+            return False, "Giveaway not found! Make sure you are using the **original** giveaway message ID, not the winner announcement ID.", []
 
         giveaway = self.giveaway_data.active_giveaways[msg_id]
 
         if not giveaway.ended:
-            await interaction.followup.send("❌ This giveaway hasn't ended yet! Use `/giveaway end` first.", ephemeral=True)
-            return
+            return False, "This giveaway hasn't ended yet! End it first.", []
 
         if giveaway.claimed_users:
             claimers = [f"<@{uid}>" for uid in giveaway.claimed_users]
-            await interaction.followup.send(
-                f"❌ Cannot reroll! The following users have already opened a claim ticket for this prize: {', '.join(claimers)}",
-                ephemeral=True
-            )
-            return
+            return False, f"Cannot reroll! The following users have already opened a claim ticket for this prize: {', '.join(claimers)}", []
 
         eligible_entries = [uid for uid in set(giveaway.entries) if uid not in giveaway.winners]
-        
         if not eligible_entries:
-            await interaction.followup.send("❌ There are no other entries to reroll from (everyone already won)!", ephemeral=True)
-            return
+            return False, "There are no other entries to reroll from (everyone already won)!", []
 
         actual_winners_count = min(giveaway.winners_count, len(eligible_entries))
         new_winners = random.sample(eligible_entries, actual_winners_count)
 
         channel = self.bot.get_channel(giveaway.channel_id)
         if not channel:
-            await interaction.followup.send("❌ Giveaway channel not found.", ephemeral=True)
-            return
+            return False, "Giveaway channel not found.", []
 
         if giveaway.announcement_message_id:
             try:
@@ -954,19 +943,15 @@ class Giveaways(commands.Cog):
         self.giveaway_data.add_giveaway(msg_id, giveaway)
 
         winner_mentions = [f"<@{w}>" for w in new_winners]
-        announcement_embed = discord.Embed(
-            title="🎉 Giveaway Rerolled! 🎉",
-            description=(
-                f"**Giveaway:** {giveaway.title}\n"
-                f"**Prize:** {giveaway.prize}\n\n"
-                f"**New Winners:** {', '.join(winner_mentions)}\n\n"
-                f"📝 Click the **Claim Prize** button below to claim your prize!\n\n"
-                f"⏰ Claim deadline: <t:{int(giveaway.claim_end_time.timestamp())}:R>"
-            ),
-            color=0x00FF00,
-            timestamp=datetime.now(timezone.utc),
-        )
-        announcement_embed.set_footer(text="Prize claim is open (Rerolled).")
+
+        # Keep the original giveaway message in sync with the new winners,
+        # using the same "ended" embed style end_giveaway() uses.
+        try:
+            original_msg = await channel.fetch_message(msg_id)
+            results_embed = build_ended_embed(giveaway, new_winners)
+            await original_msg.edit(embed=results_embed, view=None)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+            print(f"Failed to update original giveaway message on reroll: {e}")
 
         claim_view = WinnerClaimView(
             giveaway_data=self.giveaway_data,
@@ -977,32 +962,46 @@ class Giveaways(commands.Cog):
             claim_end_time=giveaway.claim_end_time,
         )
 
-        announcement_msg = await channel.send(content=" ".join(winner_mentions), embed=announcement_embed, view=claim_view)
+        announcement_msg = await channel.send(
+            content=f"🎉 Congratulations {', '.join(winner_mentions)}, you won **{giveaway.prize}**! (Rerolled)",
+            view=claim_view,
+        )
+
+        # discord.py only auto-persists a view across restarts if it was
+        # registered via bot.add_view — do that here too (setup_hook only
+        # does this once, at startup, for giveaways that were already
+        # active/claimable then).
+        self.bot.add_view(claim_view, message_id=announcement_msg.id)
 
         giveaway.announcement_message_id = announcement_msg.id
         self.giveaway_data.add_giveaway(msg_id, giveaway)
 
-        await interaction.followup.send(f"✅ Giveaway rerolled! New winners: {', '.join(winner_mentions)}")
+        return True, f"Giveaway rerolled! New winners: {', '.join(winner_mentions)}", new_winners
+
+    @giveaway_group.command(name="reroll", description="Reroll a giveaway winner")
+    @app_commands.describe(message_id="The giveaway to reroll")
+    @admin_only()
+    async def reroll_giveaway(self, interaction: discord.Interaction, message_id: str):
+        await interaction.response.defer()
+
+        try: msg_id = int(message_id)
+        except ValueError:
+            await interaction.followup.send("❌ Invalid message ID!", ephemeral=True)
+            return
+
+        ok, message, _new_winners = await self.reroll_giveaway_action(msg_id)
+        await interaction.followup.send(f"{'✅' if ok else '❌'} {message}", ephemeral=not ok)
 
     @reroll_giveaway.autocomplete("message_id")
     async def reroll_giveaway_autocomplete(self, interaction: discord.Interaction, current: str):
         return await self._giveaway_autocomplete(current)
 
-    @giveaway_group.command(name="delete", description="Permanently delete a giveaway (messages, DB entry, everything)")
-    @app_commands.describe(message_id="The giveaway to delete")
-    @admin_only()
-    async def delete_giveaway(self, interaction: discord.Interaction, message_id: str):
-        try: msg_id = int(message_id)
-        except ValueError:
-            await interaction.response.send_message("❌ Invalid message ID!", ephemeral=True)
-            return
-
+    async def delete_giveaway_action(self, msg_id: int) -> tuple[bool, str]:
+        """Does the actual delete work — shared by the /giveaway delete slash
+        command and the AI agent. Returns (success, message)."""
         giveaway = self.giveaway_data.active_giveaways.get(msg_id)
         if not giveaway:
-            await interaction.response.send_message("❌ Giveaway not found!", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
+            return False, "Giveaway not found!"
 
         channel = self.bot.get_channel(giveaway.channel_id)
         deleted_messages = []
@@ -1029,9 +1028,20 @@ class Giveaways(commands.Cog):
         self.giveaway_data.remove_giveaway(msg_id)
 
         summary = f" ({', '.join(deleted_messages)} deleted)" if deleted_messages else ""
-        await interaction.followup.send(
-            f"✅ Giveaway **{giveaway.title}** has been permanently deleted{summary}.", ephemeral=True
-        )
+        return True, f"Giveaway **{giveaway.title}** has been permanently deleted{summary}."
+
+    @giveaway_group.command(name="delete", description="Permanently delete a giveaway (messages, DB entry, everything)")
+    @app_commands.describe(message_id="The giveaway to delete")
+    @admin_only()
+    async def delete_giveaway(self, interaction: discord.Interaction, message_id: str):
+        try: msg_id = int(message_id)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid message ID!", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        ok, message = await self.delete_giveaway_action(msg_id)
+        await interaction.followup.send(f"{'✅' if ok else '❌'} {message}", ephemeral=True)
 
     @delete_giveaway.autocomplete("message_id")
     async def delete_giveaway_autocomplete(self, interaction: discord.Interaction, current: str):

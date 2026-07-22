@@ -47,6 +47,12 @@ COGS = [
 
 class Bot(commands.Bot):
     async def setup_hook(self):
+        # Give the Flask dashboard (running in its own thread — see run_web()
+        # below) a way to reach real discord.py objects, not just raw REST.
+        # Needed by ai_agent.py's giveaway tools, which call into the live
+        # Giveaways cog instead of re-implementing it over REST.
+        flask_app.set_discord_bot(self)
+
         # --- MongoDB Setup ---
         self.db = get_db()
         if self.db is None:
