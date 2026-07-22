@@ -103,8 +103,10 @@ class ClaimManager:
             print(f"❌ Failed to create claim indexes: {e}")
     
     def create_claim(self, user_id: int, mc_ign: str, claim_channel_id: int, 
-                     giveaway_message_id: int, giveaway_data: dict) -> str:
-        """Create a new claim record."""
+                     giveaway_message_id: int, giveaway_data: dict) -> Optional[str]:
+        """Create a new claim record. Returns claim ID or None."""
+        if self.db is None:
+            return None
         doc = {
             "user_id": user_id,
             "mc_ign": mc_ign,
@@ -131,6 +133,8 @@ class ClaimManager:
     
     def get_claim_by_channel(self, channel_id: int) -> Optional[dict]:
         """Get claim by claim channel ID."""
+        if self.db is None:
+            return None
         try:
             return self.db["giveaway_claims"].find_one({"claim_channel_id": channel_id})
         except Exception as e:
@@ -139,6 +143,8 @@ class ClaimManager:
     
     def get_claims_for_giveaway(self, giveaway_message_id: int) -> List[dict]:
         """Get all claims for a giveaway."""
+        if self.db is None:
+            return []
         try:
             return list(self.db["giveaway_claims"].find(
                 {"giveaway_message_id": giveaway_message_id}
@@ -149,6 +155,8 @@ class ClaimManager:
     
     def get_unpaid_claims_for_giveaway(self, giveaway_message_id: int) -> List[dict]:
         """Get unpaid claims for a giveaway."""
+        if self.db is None:
+            return []
         try:
             return list(self.db["giveaway_claims"].find({
                 "giveaway_message_id": giveaway_message_id,
@@ -160,6 +168,8 @@ class ClaimManager:
     
     def get_all_unpaid_claims(self) -> List[dict]:
         """Get all unpaid claims across all giveaways."""
+        if self.db is None:
+            return []
         try:
             return list(self.db["giveaway_claims"].find({"paid": False}))
         except Exception as e:
@@ -168,6 +178,8 @@ class ClaimManager:
     
     def mark_paid(self, claim_id: str, paid_by: int, amount: str) -> bool:
         """Mark a claim as paid."""
+        if self.db is None:
+            return False
         try:
             result = self.db["giveaway_claims"].update_one(
                 {"_id": ObjectId(claim_id)},
@@ -185,6 +197,8 @@ class ClaimManager:
     
     def get_claim_by_id(self, claim_id: str) -> Optional[dict]:
         """Get claim by its ID."""
+        if self.db is None:
+            return None
         try:
             return self.db["giveaway_claims"].find_one({"_id": ObjectId(claim_id)})
         except Exception as e:
@@ -203,6 +217,9 @@ class GiveawayData:
         self.load_data()
 
     def load_data(self):
+        if self.db is None:
+            print("⚠️ No database available - giveaways will not be persisted")
+            return
         try:
             collection = self.db["giveaways"]
             for doc in collection.find():
@@ -215,6 +232,8 @@ class GiveawayData:
 
     def add_giveaway(self, message_id: int, giveaway):
         self.active_giveaways[message_id] = giveaway
+        if self.db is None:
+            return
         try:
             self.db["giveaways"].update_one(
                 {"message_id": message_id},
@@ -227,6 +246,8 @@ class GiveawayData:
     def remove_giveaway(self, message_id: int):
         if message_id in self.active_giveaways:
             del self.active_giveaways[message_id]
+        if self.db is None:
+            return
         try:
             self.db["giveaways"].delete_one({"message_id": message_id})
         except Exception as e:
@@ -688,7 +709,8 @@ class Giveaways(commands.Cog):
         self.bot = bot
         self.giveaway_data = GiveawayData(self.bot.db)
         self.sponsors = GiveawaySponsors(self.bot.db)
-        self.claim_manager = ClaimManager(self.bot.db) if self.bot.db else None
+        # Only create ClaimManager if db is not None
+        self.claim_manager = ClaimManager(self.bot.db) if self.bot.db is not None else None
 
         for msg_id, giveaway in self.giveaway_data.active_giveaways.items():
             if not giveaway.ended:
@@ -1024,7 +1046,8 @@ class Giveaways(commands.Cog):
     @app_commands.describe(message_id="The giveaway to end")
     @admin_only()
     async def end_giveaway_early(self, interaction: discord.Interaction, message_id: str):
-        try: msg_id = int(message_id)
+        try: 
+            msg_id = int(message_id)
         except ValueError:
             await interaction.response.send_message("❌ Invalid message ID!", ephemeral=True)
             return
@@ -1119,7 +1142,8 @@ class Giveaways(commands.Cog):
     async def reroll_giveaway(self, interaction: discord.Interaction, message_id: str):
         await interaction.response.defer()
 
-        try: msg_id = int(message_id)
+        try: 
+            msg_id = int(message_id)
         except ValueError:
             await interaction.followup.send("❌ Invalid message ID!", ephemeral=True)
             return
@@ -1169,7 +1193,8 @@ class Giveaways(commands.Cog):
     @app_commands.describe(message_id="The giveaway to delete")
     @admin_only()
     async def delete_giveaway(self, interaction: discord.Interaction, message_id: str):
-        try: msg_id = int(message_id)
+        try: 
+            msg_id = int(message_id)
         except ValueError:
             await interaction.response.send_message("❌ Invalid message ID!", ephemeral=True)
             return
