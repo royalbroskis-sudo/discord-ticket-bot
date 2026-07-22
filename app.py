@@ -42,7 +42,7 @@ REDIRECT_URI = os.getenv("REDIRECT_URI")
 BOT_TOKEN = get_bot_token()
 
 # Live discord.py Bot instance, wired up by bot.py right after it constructs
-# the bot (see bot.py: `app.set_discord_bot(bot)`). Flask runs in its own
+# the bot (see bot.py: `app_module.set_discord_bot(bot)`). Flask runs in its own
 # thread (see bot.py's run_web()), so this is the only way the dashboard's
 # AI agent can reach real discord.py objects (needed for giveaway actions —
 # see ai_agent.py's _run_on_bot_loop) instead of talking over raw REST like

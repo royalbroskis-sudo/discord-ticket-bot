@@ -11,6 +11,7 @@ from db import get_bot_token, get_db
 
 # Import the Flask app from the root directory
 from app import app as flask_app
+import app as app_module
 
 load_dotenv()
 
@@ -51,7 +52,7 @@ class Bot(commands.Bot):
         # below) a way to reach real discord.py objects, not just raw REST.
         # Needed by ai_agent.py's giveaway tools, which call into the live
         # Giveaways cog instead of re-implementing it over REST.
-        flask_app.set_discord_bot(self)
+        app_module.set_discord_bot(self)
 
         # --- MongoDB Setup ---
         self.db = get_db()
