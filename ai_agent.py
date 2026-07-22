@@ -33,6 +33,7 @@ import json
 import logging
 import time
 import asyncio
+import re
 import requests
 
 from personality import PERSONALITY
@@ -1360,7 +1361,7 @@ def simple_chat(messages: list, temperature: float = 0.7, max_tokens: int = 600)
     return data["choices"][0]["message"]["content"] or "..."
 
 
-def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api, db=None, actor_name: str = "AI", bot=None):
+def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api, db=None, actor_name: str = "AI", discord_id: str = None, bot=None):
     """Actually performs a destructive action via the Discord REST API.
     Shared by app.py's dashboard confirm-execute route and the trusted-staff
     auto-execute path used from Discord chat (cogs/ai_chat.py).
@@ -1368,6 +1369,9 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
     `db` is only needed for the warning tools (they write to the `warnings`
     collection directly, same shape list_warnings reads). `actor_name` is
     recorded as the "mod" on new warning entries.
+
+    `discord_id` is the Discord user ID of the person making the request,
+    used for MC bot payment operations.
 
     `bot` is only needed for the giveaway tools — unlike everything else
     here, which talks to Discord purely over REST, giveaways rely on real
@@ -1906,22 +1910,43 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                         try:
                             # Run the async method on the bot's event loop
                             if bot and bot.loop and bot.loop.is_running():
-                                # Get the discord_id from actor_name if it's a user ID
-                                discord_id = int(actor_name) if actor_name and actor_name.isdigit() else None
+                                # Get the discord_id - use the passed parameter or try to parse from actor_name
+                                user_id = None
+                                if discord_id:
+                                    try:
+                                        user_id = int(discord_id)
+                                    except ValueError:
+                                        pass
                                 
-                                future = asyncio.run_coroutine_threadsafe(
-                                    payment_cog.pay_giveaway(
-                                        guild_id=guild_id,
-                                        discord_id=discord_id,
-                                        giveaway_message_id=msg_id,
-                                        requester_name=actor_name
-                                    ),
-                                    bot.loop
-                                )
-                                success, message, paid_count, failed_count = future.result(timeout=120)
-                                ok = success
-                                error = None if success else message
-                                detail = f"Paid {paid_count} winners, {failed_count} failed"
+                                # If we still don't have a user_id, try to parse from actor_name
+                                if not user_id and actor_name:
+                                    # actor_name might be "username#1234" or just the username
+                                    # Try to extract the ID if it's in the format "username#1234"
+                                    match = re.search(r'#(\d+)', actor_name)
+                                    if match:
+                                        try:
+                                            user_id = int(match.group(1))
+                                        except ValueError:
+                                            pass
+                                    # If that fails, actor_name might be just the username with no ID
+                                    # In that case, we can't proceed
+                                
+                                if not user_id:
+                                    ok, error = False, "Could not determine Discord user ID for MC bot payment. Please link your MC account first."
+                                else:
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        payment_cog.pay_giveaway(
+                                            guild_id=guild_id,
+                                            discord_id=user_id,
+                                            giveaway_message_id=msg_id,
+                                            requester_name=actor_name
+                                        ),
+                                        bot.loop
+                                    )
+                                    success, message, paid_count, failed_count = future.result(timeout=120)
+                                    ok = success
+                                    error = None if success else message
+                                    detail = f"Paid {paid_count} winners, {failed_count} failed"
                             else:
                                 ok, error = False, "Bot event loop not available"
                         except asyncio.TimeoutError:
@@ -1949,20 +1974,37 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                     else:
                         try:
                             if bot and bot.loop and bot.loop.is_running():
-                                discord_id = int(actor_name) if actor_name and actor_name.isdigit() else None
+                                # Get the discord_id - use the passed parameter or try to parse from actor_name
+                                user_id = None
+                                if discord_id:
+                                    try:
+                                        user_id = int(discord_id)
+                                    except ValueError:
+                                        pass
                                 
-                                future = asyncio.run_coroutine_threadsafe(
-                                    payment_cog.pay_all_claims(
-                                        guild_id=guild_id,
-                                        discord_id=discord_id,
-                                        requester_name=actor_name
-                                    ),
-                                    bot.loop
-                                )
-                                success, message, paid_count, failed_count = future.result(timeout=120)
-                                ok = success
-                                error = None if success else message
-                                detail = f"Paid {paid_count} winners across all giveaways, {failed_count} failed"
+                                if not user_id and actor_name:
+                                    match = re.search(r'#(\d+)', actor_name)
+                                    if match:
+                                        try:
+                                            user_id = int(match.group(1))
+                                        except ValueError:
+                                            pass
+                                
+                                if not user_id:
+                                    ok, error = False, "Could not determine Discord user ID for MC bot payment. Please link your MC account first."
+                                else:
+                                    future = asyncio.run_coroutine_threadsafe(
+                                        payment_cog.pay_all_claims(
+                                            guild_id=guild_id,
+                                            discord_id=user_id,
+                                            requester_name=actor_name
+                                        ),
+                                        bot.loop
+                                    )
+                                    success, message, paid_count, failed_count = future.result(timeout=120)
+                                    ok = success
+                                    error = None if success else message
+                                    detail = f"Paid {paid_count} winners across all giveaways, {failed_count} failed"
                             else:
                                 ok, error = False, "Bot event loop not available"
                         except asyncio.TimeoutError:
@@ -1991,6 +2033,7 @@ def run_agent_turn(
     auto_execute: bool = False,
     log_action=None,
     actor_name: str = "AI",
+    discord_id: str = None,
     bot=None,
 ):
     """
@@ -2009,6 +2052,9 @@ def run_agent_turn(
       `actor_name` is recorded as the "mod" on any warn_member entries
       written during this turn (defaults to "AI" for the confirm-first
       dashboard path).
+      
+      `discord_id` is the Discord user ID of the person making the request,
+      used for MC bot payment operations.
 
     Returns:
       {
@@ -2063,7 +2109,13 @@ def run_agent_turn(
                 return {"reply": reply, "history": messages[1:], "pending_action": pending}
 
             if name in DESTRUCTIVE_TOOLS:  # auto_execute is True here
-                ok, error, detail = _run_destructive_tool(name, args, guild_id, discord_api, db=db, actor_name=actor_name, bot=bot)
+                ok, error, detail = _run_destructive_tool(
+                    name, args, guild_id, discord_api, 
+                    db=db, 
+                    actor_name=actor_name, 
+                    discord_id=discord_id,
+                    bot=bot
+                )
                 if log_action:
                     try:
                         log_action(name, args, ok, error, detail)

@@ -2,26 +2,6 @@
 cogs/ai_chat.py
 
 Conversational AI in Discord.
-
-Triggers when:
-  - Someone @mentions the bot directly (not @everyone/@here), or
-  - Someone replies to a message the bot sent
-
-Two modes, based on the message author's roles:
-  - Regular members: casual chat only (ai_agent.simple_chat), no tool access.
-  - Trusted Staff (the role configured on the dashboard, TRUSTED_STAFF_ROLE_ID)
-    or Administrators: full tool access via ai_agent.run_agent_turn with
-    auto_execute=True — "@bot mute jake for 10 minutes for spamming" actually
-    does it, no dashboard confirm step, because the role check already is
-    the authorization.
-
-Uses the same free GEMINI_API_KEY as everything else in ai_agent.py.
-Every auto-executed action is logged to the same `console_actions`
-collection the dashboard console writes to, so it shows up in Recent
-Console Actions there too.
-
-Tone comes from personality.py, shared with ai_agent.py — edit that
-file to change how the bot talks, not this one.
 """
 
 import discord
@@ -33,9 +13,9 @@ from app import _discord_api
 from cogs.config import get_guild_config, member_has_role_id
 from personality import PERSONALITY
 
-MAX_HISTORY_TURNS = 6       # user+assistant pairs kept per channel
-COOLDOWN_SECONDS = 4        # per-user, to avoid spam/rate-limit issues
-DISCORD_CHUNK = 1900        # stay under Discord's 2000 char message limit
+MAX_HISTORY_TURNS = 6
+COOLDOWN_SECONDS = 4
+DISCORD_CHUNK = 1900
 
 SYSTEM_PROMPT_TEMPLATE = PERSONALITY + "\n\n" + (
     "The above is tone only — the rules below always win if they ever pull in "
@@ -53,10 +33,9 @@ SYSTEM_PROMPT_TEMPLATE = PERSONALITY + "\n\n" + (
 class AIChat(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._history: dict[int, list[dict]] = {}       # channel_id -> [{role, content}, ...]
-        self._last_reply_at: dict[int, datetime] = {}    # user_id -> last reply time
+        self._history: dict[int, list[dict]] = {}
+        self._last_reply_at: dict[int, datetime] = {}
 
-    # ── Helpers ──────────────────────────────────────────────────────────
     def _get_history(self, channel_id: int) -> list[dict]:
         return self._history.setdefault(channel_id, [])
 
@@ -80,7 +59,6 @@ class AIChat(commands.Cog):
             return False
         if ref.resolved and isinstance(ref.resolved, discord.Message):
             return ref.resolved.author.id == self.bot.user.id
-        # Not cached — fetch it once to check the author
         try:
             ref_msg = await message.channel.fetch_message(ref.message_id)
             return ref_msg.author.id == self.bot.user.id
@@ -116,7 +94,6 @@ class AIChat(commands.Cog):
                 print(f"❌ AIChat: failed to log console action: {e}")
         return _log
 
-    # ── Listener ─────────────────────────────────────────────────────────
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -129,12 +106,11 @@ class AIChat(commands.Cog):
             return
 
         if not ai_agent.GEMINI_API_KEY:
-            return  # feature not configured — stay silent rather than error in chat
+            return
 
         if self._on_cooldown(message.author.id):
             return
 
-        # Strip the mention text out of the message content
         content = message.content
         for m in message.mentions:
             content = content.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
@@ -147,6 +123,9 @@ class AIChat(commands.Cog):
         try:
             async with message.channel.typing():
                 if trusted:
+                    # Pass BOTH the display name AND the user ID
+                    # The actor_name is used for display/audit logs
+                    # The discord_id is used for the MC bot payment system
                     result = await self.bot.loop.run_in_executor(
                         None,
                         lambda: ai_agent.run_agent_turn(
@@ -157,7 +136,8 @@ class AIChat(commands.Cog):
                             self.bot.db,
                             auto_execute=True,
                             log_action=self._log_action(message.guild.id, message.author),
-                            actor_name=str(message.author),
+                            actor_name=str(message.author),  # Display name for logs
+                            discord_id=str(message.author.id),  # <-- ADD THIS: numeric ID for MC bot
                             bot=self.bot,
                         ),
                     )
@@ -173,9 +153,6 @@ class AIChat(commands.Cog):
                     )
                     reply = await self.bot.loop.run_in_executor(None, ai_agent.simple_chat, messages)
         except Exception as e:
-            # Previously this just printed to console and returned, so a
-            # Gemini rate-limit/timeout/etc looked to the user like the bot
-            # ignored them entirely with no way to tell what happened.
             print(f"❌ AIChat: Gemini call failed: {e}")
             try:
                 await message.reply(
