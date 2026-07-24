@@ -1805,8 +1805,29 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 mod_cog = _moderation_cog()
                 mod_cog._warnings[guild_id][int(user_id)].append(entry)
                 mod_cog.save_user_warnings(db, guild_id, int(user_id), mod_cog._warnings[guild_id][int(user_id)])
+                count = len(mod_cog._warnings[guild_id][int(user_id)])
                 ok = True
                 detail = reason
+
+                # Best-effort DM, matching /warn in cogs/moderation.py. A
+                # failed/blocked DM should never undo the warning itself —
+                # it's already saved above — so this never flips `ok` to
+                # False, same as /warn's own bare `except discord.HTTPException: pass`.
+                try:
+                    guild_r = discord_api("GET", f"/guilds/{guild_id}")
+                    guild_name = guild_r.json().get("name", "the server") if guild_r.ok else "the server"
+                    dm = discord_api("POST", "/users/@me/channels", json={"recipient_id": user_id})
+                    if dm.ok:
+                        dm_channel_id = dm.json()["id"]
+                        discord_api("POST", f"/channels/{dm_channel_id}/messages", json={
+                            "content": (
+                                f"⚠️ You have received a warning in **{guild_name}**.\n"
+                                f"Reason: {reason}\n"
+                                f"You now have **{count}** warning(s)."
+                            )
+                        })
+                except Exception as e:
+                    logger.warning(f"warn_member: DM to {user_id} failed (warning still saved): {e}")
 
         elif tool_name == "clear_warnings":
             if db is None:
