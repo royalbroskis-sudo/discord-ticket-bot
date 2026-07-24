@@ -37,9 +37,29 @@ import re
 import requests
 
 from personality import PERSONALITY
-from cogs import moderation as moderation_cog
-from cogs import afk as afk_cog
-from cogs import tickets as tickets_cog
+import sys
+import importlib
+
+# NOTE: these are intentionally NOT plain `from cogs import moderation as
+# moderation_cog`-style imports. If a cog is ever hot-reloaded (bot.py's
+# !reload / !sync commands call bot.reload_extension(), which replaces
+# sys.modules['cogs.moderation'] with a BRAND NEW module object rather than
+# refreshing the existing one in place), a cached reference taken at import
+# time keeps pointing at the old, now-orphaned module — including its old
+# _warnings dict, which nothing else reads from anymore. Writes would still
+# "succeed" with no error, just into a dict no one checks, until the next
+# full process restart. Looking these up fresh from sys.modules on every
+# call instead means we always get whatever's actually live right now.
+def _moderation_cog():
+    return sys.modules.get("cogs.moderation") or importlib.import_module("cogs.moderation")
+
+
+def _afk_cog():
+    return sys.modules.get("cogs.afk") or importlib.import_module("cogs.afk")
+
+
+def _tickets_cog():
+    return sys.modules.get("cogs.tickets") or importlib.import_module("cogs.tickets")
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +69,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 MAX_TOOL_ITERATIONS = int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "15"))  # safety cap so a confused model can't loop forever
 
-SYSTEM_PROMPT = PERSONALITY + "\n\n" + """The above is tone only — everything below is operational and always wins
+SYSTEM_PROMPT_BASE = PERSONALITY + "\n\n" + """The above is tone only — everything below is operational and always wins
 if the two ever pull in different directions.
 
 You are the admin assistant for a Discord server's web dashboard.
@@ -68,8 +88,7 @@ Rules:
   clarifying question instead of guessing.
 - You cannot see channels/roles unless you call list_channels / list_roles, or
   they were already given to you in this conversation — don't assume IDs.
-- Destructive tools are never executed by you directly; proposing the call is
-  enough, the dashboard will ask the human to confirm.
+{execution_mode_note}
 - When a request involves the same action on multiple targets (e.g. warning
   several users, creating several channels), include all of those tool calls
   in the same response instead of spreading them one-per-turn — you have a
@@ -78,7 +97,29 @@ Rules:
   accurately what was done — target, action, reason if any. Personality can
   flavor the wording around it, but never at the cost of clarity: someone
   reading only that sentence should know exactly what happened on the server.
+- If a tool result includes a "username" field, name that person by their
+  actual username in your confirmation, not just their numeric ID — this is
+  the human's only quick way to catch a lookup_user match on the wrong person.
 """
+
+# Two variants of the one instruction whose truth depends on auto_execute:
+# the dashboard path (auto_execute=False) only proposes destructive tools for
+# a human to confirm; the trusted-staff Discord path (auto_execute=True)
+# actually runs them immediately. Telling the model the wrong one of these
+# makes it unsure whether an action really happened, so it's picked per-call
+# in run_agent_turn rather than baked into a single static prompt.
+_EXECUTION_NOTE_PROPOSE = (
+    "- Destructive tools are never executed by you directly; proposing the call is\n"
+    "  enough, the dashboard will ask the human to confirm."
+)
+_EXECUTION_NOTE_AUTO = (
+    "- Destructive tools you call ARE executed immediately against the server —\n"
+    "  there is no separate human confirmation step in this conversation. Only call\n"
+    "  one once you're actually ready to do it, and report the real outcome (success\n"
+    "  or the specific error) back to the user afterward, never a guess."
+)
+
+SYSTEM_PROMPT = SYSTEM_PROMPT_BASE.format(execution_mode_note=_EXECUTION_NOTE_PROPOSE)
 
 # ---------------------------------------------------------------------------
 # Tool schema (OpenAI-compatible function-calling format)
@@ -867,23 +908,28 @@ READ_ONLY_TOOLS = {
 DESTRUCTIVE_TOOLS = {t["function"]["name"] for t in TOOLS} - READ_ONLY_TOOLS
 
 
-def _friendly_action_description(tool_name: str, args: dict) -> str:
-    """Human-readable one-liner shown in the Confirm/Cancel UI."""
+def _friendly_action_description(tool_name: str, args: dict, username: str | None = None) -> str:
+    """Human-readable one-liner shown in the Confirm/Cancel UI and in
+    completed-action logs. `username` (when available) is shown next to the
+    raw ID for any user_id-based tool so a bad lookup_user match (warning/
+    kicking/etc. the wrong person) is visible immediately instead of hiding
+    behind an opaque numeric ID."""
     uid = args.get("user_id", "?")
+    who = f"{username} (`{uid}`)" if username else f"`{uid}`"
     if tool_name == "kick_member":
-        return f"Kick user `{uid}` — reason: {args.get('reason') or 'none given'}"
+        return f"Kick user {who} — reason: {args.get('reason') or 'none given'}"
     if tool_name == "ban_member":
-        return f"Ban user `{uid}` (delete {args.get('delete_days', 0)}d of messages) — reason: {args.get('reason') or 'none given'}"
+        return f"Ban user {who} (delete {args.get('delete_days', 0)}d of messages) — reason: {args.get('reason') or 'none given'}"
     if tool_name == "unban_member":
-        return f"Unban user `{uid}`"
+        return f"Unban user {who}"
     if tool_name == "timeout_member":
-        return f"Timeout user `{uid}` for {args.get('minutes', 10)} minute(s) — reason: {args.get('reason') or 'none given'}"
+        return f"Timeout user {who} for {args.get('minutes', 10)} minute(s) — reason: {args.get('reason') or 'none given'}"
     if tool_name == "remove_timeout":
-        return f"Remove timeout from user `{uid}`"
+        return f"Remove timeout from user {who}"
     if tool_name == "add_role":
-        return f"Add role `{args.get('role_id')}` to user `{uid}`"
+        return f"Add role `{args.get('role_id')}` to user {who}"
     if tool_name == "remove_role":
-        return f"Remove role `{args.get('role_id')}` from user `{uid}`"
+        return f"Remove role `{args.get('role_id')}` from user {who}"
     if tool_name == "send_message":
         text = (args.get("content") or "").strip()
         embed_title = (args.get("embed") or {}).get("title")
@@ -893,7 +939,7 @@ def _friendly_action_description(tool_name: str, args: dict) -> str:
         text = (args.get("content") or "").strip()
         embed_title = (args.get("embed") or {}).get("title")
         label = f"\"{text[:80]}\"" if text else f"embed \"{embed_title}\"" if embed_title else "an embed"
-        return f"DM user `{uid}`: {label}"
+        return f"DM user {who}: {label}"
     if tool_name == "create_channel":
         return f"Create channel `#{args.get('name')}`" + (f" under category `{args.get('parent_id')}`" if args.get("parent_id") else "")
     if tool_name == "rename_channel":
@@ -1369,13 +1415,17 @@ def _run_read_only_tool(tool_name: str, args: dict, guild_id: int, discord_api, 
                         else:
                             unpaid_count += 1
                 
+                status = "Active"
+                if g.ended:
+                    status = "Claim expired" if getattr(g, "claim_expired", False) else "Ended"
+
                 giveaways.append({
                     "message_id": str(msg_id),
                     "display_id": g.display_id,
                     "title": g.title,
                     "prize": g.prize,
                     "channel_id": str(g.channel_id),
-                    "status": "Ended" if g.ended else "Active",
+                    "status": status,
                     "winners_count": g.winners_count,
                     "entries": len(g.entries),
                     "winners": [str(w) for w in g.winners] if g.ended else [],
@@ -1752,8 +1802,9 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 # not the DB directly — writing only to the collection (as
                 # this used to do) saves fine but never shows up there until
                 # a restart. Write to both, same as the real /warn command.
-                moderation_cog._warnings[guild_id][int(user_id)].append(entry)
-                moderation_cog.save_user_warnings(db, guild_id, int(user_id), moderation_cog._warnings[guild_id][int(user_id)])
+                mod_cog = _moderation_cog()
+                mod_cog._warnings[guild_id][int(user_id)].append(entry)
+                mod_cog.save_user_warnings(db, guild_id, int(user_id), mod_cog._warnings[guild_id][int(user_id)])
                 ok = True
                 detail = reason
 
@@ -1761,8 +1812,8 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             if db is None:
                 ok, error = False, "Database unavailable"
             else:
-                moderation_cog._warnings[guild_id][int(user_id)] = []
-                moderation_cog.save_user_warnings(db, guild_id, int(user_id), [])
+                _moderation_cog()._warnings[guild_id][int(user_id)] = []
+                _moderation_cog().save_user_warnings(db, guild_id, int(user_id), [])
                 ok = True
                 detail = "all warnings cleared"
 
@@ -1783,7 +1834,7 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 current_nick = mdata.get("nick")
                 display_name = current_nick or user_data.get("global_name") or user_data.get("username") or user_id
                 afk_reason = (args.get("reason") or "No reason provided").strip()[:200]
-                new_nick = afk_cog.afk_nickname(display_name)
+                new_nick = _afk_cog().afk_nickname(display_name)
                 r = discord_api(
                     "PATCH", f"/guilds/{guild_id}/members/{user_id}",
                     reason=f"AFK: {afk_reason}"[:512], json={"nick": new_nick},
@@ -1791,12 +1842,12 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 if not r.ok:
                     ok, error = False, f"HTTP {r.status_code}: {r.text[:200]}"
                 else:
-                    afk_cog.set_afk_entry(guild_id, int(user_id), afk_reason, current_nick, db=db)
+                    _afk_cog().set_afk_entry(guild_id, int(user_id), afk_reason, current_nick, db=db)
                     ok = True
                     detail = afk_reason
 
         elif tool_name == "clear_afk":
-            entry = afk_cog.clear_afk_entry(guild_id, int(user_id), db=db)
+            entry = _afk_cog().clear_afk_entry(guild_id, int(user_id), db=db)
             if entry is None:
                 ok, error = False, "That member isn't currently marked AFK."
             else:
@@ -1927,7 +1978,7 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                 cdata = cr.json()
                 topic = cdata.get("topic") or ""
                 shim = _ChannelShim(cdata.get("name", ""), topic, _snowflake_to_datetime(channel_id))
-                if not tickets_cog.has_ticket_topic(shim):
+                if not _tickets_cog().has_ticket_topic(shim):
                     ok, error = False, "That doesn't look like a ticket channel (no ticket topic found) — refusing to close it as one. Use delete_channel for regular channels."
                 else:
                     creator_name, category = _parse_ticket_topic(topic)
@@ -1941,10 +1992,10 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                                 creator_id = m["author_id"]
                                 break
 
-                        html_content = tickets_cog._generate_html(shim, messages, actor_name, creator_name, category)
+                        html_content = _tickets_cog()._generate_html(shim, messages, actor_name, creator_name, category)
 
                         transcript_doc = {
-                            "_id": tickets_cog.ObjectId(),
+                            "_id": _tickets_cog().ObjectId(),
                             "guild_id": guild_id,
                             "channel_id": int(channel_id),
                             "channel_name": shim.name,
@@ -1965,7 +2016,7 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
                                 logger.error(f"close_ticket: failed to save transcript: {e}")
 
                         dashboard_url = os.getenv("DASHBOARD_URL", "https://your-domain.com")
-                        cfg = tickets_cog.get_guild_config(db, guild_id) if db is not None else {}
+                        cfg = _tickets_cog().get_guild_config(db, guild_id) if db is not None else {}
                         tc_id = cfg.get("TRANSCRIPT_CHANNEL_ID") if cfg else None
                         if tc_id:
                             log_embed = {
@@ -2013,7 +2064,7 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             else:
                 cdata = cr.json()
                 shim = _ChannelShim(cdata.get("name", ""), cdata.get("topic") or "")
-                if not tickets_cog.has_ticket_topic(shim):
+                if not _tickets_cog().has_ticket_topic(shim):
                     ok, error = False, "That doesn't look like a ticket channel — use rename_channel for regular channels."
                 else:
                     r = discord_api("PATCH", f"/channels/{channel_id}", reason=reason, json={"name": name})
@@ -2029,7 +2080,7 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
             else:
                 cdata = cr.json()
                 shim = _ChannelShim(cdata.get("name", ""), cdata.get("topic") or "")
-                if not tickets_cog.has_ticket_topic(shim):
+                if not _tickets_cog().has_ticket_topic(shim):
                     ok, error = False, "That doesn't look like a ticket channel."
                 elif tool_name == "add_user_to_ticket":
                     # VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY | ATTACH_FILES
@@ -2203,6 +2254,23 @@ def _run_destructive_tool(tool_name: str, args: dict, guild_id: int, discord_api
     return ok, error, detail
 
 
+def _resolve_username(discord_api, guild_id, user_id) -> str | None:
+    """Best-effort lookup of a display name for a user_id, so action
+    descriptions can show 'SomeName (`12345`)' instead of a bare ID — this
+    is what makes a bad lookup_user match (wrong person warned/kicked/etc.)
+    visible immediately instead of silently hiding behind a numeric ID."""
+    if not user_id:
+        return None
+    try:
+        r = discord_api("GET", f"/guilds/{guild_id}/members/{user_id}")
+        if r.ok:
+            data = r.json()
+            return data.get("nick") or data.get("user", {}).get("username")
+    except Exception:
+        pass
+    return None
+
+
 def run_agent_turn(
     guild_id: int,
     history: list,
@@ -2242,7 +2310,10 @@ def run_agent_turn(
         "pending_action": dict | None   # only ever set when auto_execute=False
       }
     """
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+    system_prompt = SYSTEM_PROMPT_BASE.format(
+        execution_mode_note=_EXECUTION_NOTE_AUTO if auto_execute else _EXECUTION_NOTE_PROPOSE
+    )
+    messages = [{"role": "system", "content": system_prompt}] + history + [
         {"role": "user", "content": user_message}
     ]
     completed_log = []  # human-readable record of auto-executed actions this
@@ -2267,6 +2338,10 @@ def run_agent_turn(
         messages.append(choice)
 
         tool_calls = choice.get("tool_calls")
+        logger.info(
+            f"run_agent_turn: model returned {len(tool_calls) if tool_calls else 0} tool call(s) "
+            f"this turn (auto_execute={auto_execute}); content={choice.get('content')!r}"
+        )
         if not tool_calls:
             reply = choice.get("content") or "..."
             return {"reply": reply, "history": messages[1:], "pending_action": None}
@@ -2277,17 +2352,22 @@ def run_agent_turn(
                 args = json.loads(call["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
+            logger.info(f"run_agent_turn: tool call -> {name}({args})")
 
             if name in DESTRUCTIVE_TOOLS and not auto_execute:
+                username = _resolve_username(discord_api, guild_id, args.get("user_id")) if "user_id" in args else None
                 pending = {
                     "tool": name,
                     "args": args,
-                    "description": _friendly_action_description(name, args),
+                    "description": _friendly_action_description(name, args, username=username),
                 }
                 reply = choice.get("content") or f"I'd like to: {pending['description']}"
                 return {"reply": reply, "history": messages[1:], "pending_action": pending}
 
             if name in DESTRUCTIVE_TOOLS:  # auto_execute is True here
+                # Resolve the username BEFORE executing — for kick/ban the
+                # member won't be a guild member anymore afterward to look up.
+                username = _resolve_username(discord_api, guild_id, args.get("user_id")) if "user_id" in args else None
                 ok, error, detail = _run_destructive_tool(
                     name, args, guild_id, discord_api, 
                     db=db, 
@@ -2295,19 +2375,23 @@ def run_agent_turn(
                     discord_id=discord_id,
                     bot=bot
                 )
+                logger.info(f"run_agent_turn: {name} executed -> ok={ok} error={error!r} detail={detail!r} username={username!r}")
                 if log_action:
                     try:
                         log_action(name, args, ok, error, detail)
                     except Exception as e:
                         logger.error(f"log_action callback failed: {e}")
                 result = {"ok": ok, "error": error} if not ok else {"ok": True, "detail": detail}
+                if username:
+                    result["username"] = username
                 mark = "✅" if ok else "❌"
-                line = f"{mark} {_friendly_action_description(name, args)}"
+                line = f"{mark} {_friendly_action_description(name, args, username=username)}"
                 if not ok:
                     line += f" — failed: {error}"
                 completed_log.append(line)
             else:
                 result = _run_read_only_tool(name, args, guild_id, discord_api, db, bot=bot)
+                logger.info(f"run_agent_turn: {name} (read-only) result -> {json.dumps(result)[:300]}")
 
             messages.append({
                 "role": "tool",

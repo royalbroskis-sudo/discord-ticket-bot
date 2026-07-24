@@ -4,6 +4,7 @@ cogs/ai_chat.py
 Conversational AI in Discord.
 """
 
+import logging
 import discord
 from discord.ext import commands
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ import ai_agent
 from app import _discord_api
 from cogs.config import get_guild_config, member_has_role_id
 from personality import PERSONALITY
+
+logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 6
 COOLDOWN_SECONDS = 4
@@ -23,9 +26,12 @@ SYSTEM_PROMPT_TEMPLATE = PERSONALITY + "\n\n" + (
     "You are {bot_name}, chatting in the Discord server \"{guild_name}\". Keep "
     "replies conversational and fairly short (a few sentences, unless the "
     "person clearly wants something longer or more detailed). You are NOT a "
-    "moderation tool in this conversation and cannot mute, kick, ban, or "
-    "change anything on the server — if someone asks you to do that, tell "
-    "them to use the actual mod commands or the dashboard instead. Never "
+    "moderation tool in this conversation and cannot mute, kick, ban, warn, or "
+    "change anything on the server — you have no tools available right now, "
+    "full stop. If someone asks you to warn/mute/kick/ban/etc. anyone, or to "
+    "check/clear warnings, do NOT say you've done it or pretend to comply — "
+    "tell them plainly you can't take that action here and they should use "
+    "the real slash commands (e.g. /warn) or the dashboard instead. Never "
     "claim to have taken an action you didn't actually take."
 )
 
@@ -67,11 +73,22 @@ class AIChat(commands.Cog):
 
     def _is_trusted(self, member: discord.Member) -> bool:
         if member.guild_permissions.administrator:
+            logger.debug(f"AIChat: {member} trusted via administrator perm")
             return True
         if self.bot.db is None:
+            logger.warning("AIChat: bot.db is None, cannot check TRUSTED_STAFF_ROLE_ID — treating as untrusted")
             return False
         cfg = get_guild_config(self.bot.db, member.guild.id)
-        return member_has_role_id(member, cfg.get("TRUSTED_STAFF_ROLE_ID"))
+        role_id = cfg.get("TRUSTED_STAFF_ROLE_ID")
+        result = member_has_role_id(member, role_id)
+        if not result:
+            member_role_ids = [r.id for r in member.roles]
+            logger.info(
+                f"AIChat: {member} ({member.id}) NOT trusted — configured "
+                f"TRUSTED_STAFF_ROLE_ID={role_id!r}, member's role IDs={member_role_ids}. "
+                f"Falling back to plain chat (no moderation tools available)."
+            )
+        return result
 
     def _log_action(self, guild_id: int, actor: discord.Member):
         def _log(tool_name, args, ok, error, detail):

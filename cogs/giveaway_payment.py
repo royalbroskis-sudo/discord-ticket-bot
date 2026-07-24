@@ -73,16 +73,16 @@ class PaymentManager:
         
         logger.info(f"Per winner (millions): {per_winner}")
         
-        # Format back with unit - check k FIRST before m
-        # This way 0.01m becomes 10.0k instead of 0.0m
+        # Format back with unit - largest unit first, then k, so values >= 1m
+        # are shown as m instead of falling through to the k branch.
         if per_winner >= 1000:
             result = f"{per_winner/1000:.1f}b"
-        elif per_winner >= 0.001:
-            # Show in thousands (k) - this catches 0.01m -> 10.0k
-            result = f"{per_winner * 1000:.1f}k"
         elif per_winner >= 1:
             # Show in millions
             result = f"{per_winner:.1f}m"
+        elif per_winner >= 0.001:
+            # Show in thousands (k) - this catches 0.01m -> 10.0k
+            result = f"{per_winner * 1000:.1f}k"
         else:
             # Very small amount - show raw
             result = f"{per_winner * 1000000:.1f}"

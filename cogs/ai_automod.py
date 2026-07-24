@@ -33,7 +33,20 @@ from discord import app_commands
 
 import ai_agent
 from cogs.config import admin_only, get_guild_config, member_has_role_id
-from cogs import moderation as moderation_cog
+import sys
+import importlib
+
+
+def _moderation_cog():
+    """Looks up the live cogs.moderation module fresh each call, instead of
+    caching a reference at import time. bot.reload_extension('cogs.moderation')
+    (used by bot.py's !reload / !sync) replaces sys.modules['cogs.moderation']
+    with a brand new module object rather than refreshing it in place — a
+    cached `from cogs import moderation as moderation_cog` binding would
+    silently keep pointing at the old, orphaned module (and its old
+    _warnings dict) after that, with writes succeeding into a dict nothing
+    else reads from until the next full process restart."""
+    return sys.modules.get("cogs.moderation") or importlib.import_module("cogs.moderation")
 
 logger = logging.getLogger(__name__)
 
@@ -176,9 +189,10 @@ class AIAutoMod(commands.Cog):
         # dict, not the DB, so writing straight to the warnings collection
         # (as automod.py does) never actually shows up there — that dict has
         # to be updated directly, same as the real /warn command does.
-        moderation_cog._warnings[message.guild.id][member.id].append(entry)
-        moderation_cog.save_user_warnings(
-            self.db, message.guild.id, member.id, moderation_cog._warnings[message.guild.id][member.id]
+        mod_cog = _moderation_cog()
+        mod_cog._warnings[message.guild.id][member.id].append(entry)
+        mod_cog.save_user_warnings(
+            self.db, message.guild.id, member.id, mod_cog._warnings[message.guild.id][member.id]
         )
 
         timeout_minutes = None

@@ -19,9 +19,13 @@ own gateway connection (e.g. the web dashboard running as its own worker).
 Same pattern as cogs.moderation._warnings + save_user_warnings.
 """
 
+import logging
+
 import discord
 from discord.ext import commands
 from discord import app_commands
+
+logger = logging.getLogger(__name__)
 
 # {guild_id: {user_id: {"reason": str, "original_nick": str | None}}}
 _afk: dict[int, dict[int, dict]] = {}
@@ -152,18 +156,19 @@ class AFK(commands.Cog):
                 await message.author.edit(
                     nick=entry["original_nick"], reason="No longer AFK"
                 )
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            except (discord.Forbidden, discord.HTTPException) as e:
+                logger.warning(f"AFK: couldn't restore nick for {message.author.id}: {e}")
             try:
                 await message.channel.send(
                     f"✅ Welcome back {message.author.mention}! Your AFK status has been removed.",
                     delete_after=5
                 )
-            except discord.HTTPException:
-                pass
+            except discord.HTTPException as e:
+                logger.warning(f"AFK: couldn't send welcome-back message in {message.channel.id}: {e}")
 
         # Check if any mentioned user or replied-to user is AFK
         guild_afk = _afk.get(guild_id, {})
+        logger.debug(f"AFK: guild {guild_id} currently AFK: {list(guild_afk.keys())}, mentions: {[u.id for u in message.mentions]}")
         afk_hits: list[tuple[discord.Member, str]] = []
 
         # Direct mentions
@@ -189,8 +194,8 @@ class AFK(commands.Cog):
                     f"💤 {afk_user.mention} is AFK: **{reason}**",
                     delete_after=5
                 )
-            except discord.HTTPException:
-                pass
+            except discord.HTTPException as e:
+                logger.warning(f"AFK: couldn't send AFK-ping notice for {afk_user.id} in {message.channel.id}: {e}")
 
 
 async def setup(bot: commands.Bot):

@@ -353,6 +353,11 @@ class Giveaway:
         self.winners = []
         self.announcement_message_id = None
         self.claim_end_time = None
+        # True once the claim window has passed and we've flagged it on the
+        # announcement message. Giveaway/claims stay in the DB after this so
+        # unpaid claims can still be found and paid later — only the explicit
+        # /giveaway delete command removes the DB record.
+        self.claim_expired = False
         self.claimed_users = set()
         # Maps str(winner_id) -> claim ticket channel_id, so re-open checks can
         # verify whether that specific channel still exists (rename-proof and
@@ -380,6 +385,7 @@ class Giveaway:
             'winners': self.winners,
             'announcement_message_id': self.announcement_message_id,
             'claim_end_time': ensure_aware(self.claim_end_time).isoformat() if self.claim_end_time else None,
+            'claim_expired': self.claim_expired,
             'claimed_users': list(self.claimed_users),
             'claim_channels': self.claim_channels,
             'preset_winner_id': self.preset_winner_id,
@@ -405,6 +411,7 @@ class Giveaway:
         giveaway.ended = data.get('ended', False)
         giveaway.winners = data.get('winners', [])
         giveaway.announcement_message_id = data.get('announcement_message_id')
+        giveaway.claim_expired = data.get('claim_expired', False)
         giveaway.claimed_users = set(data.get('claimed_users', []))
         giveaway.claim_channels = data.get('claim_channels', {})
 
@@ -773,7 +780,8 @@ class Giveaways(commands.Cog):
         for msg_id, giveaway in list(self.giveaway_data.active_giveaways.items()):
             if not giveaway.ended and now >= ensure_aware(giveaway.end_time):
                 ended_giveaways.append((msg_id, giveaway))
-            elif giveaway.ended and giveaway.claim_end_time and now >= ensure_aware(giveaway.claim_end_time):
+            elif (giveaway.ended and giveaway.claim_end_time and not giveaway.claim_expired
+                    and now >= ensure_aware(giveaway.claim_end_time)):
                 expired_claims.append((msg_id, giveaway))
 
         for msg_id, giveaway in ended_giveaways:
@@ -796,7 +804,15 @@ class Giveaways(commands.Cog):
             except Exception as e:
                 print(f"Failed to expire claim view: {e}")
 
-        self.giveaway_data.remove_giveaway(message_id)
+        # IMPORTANT: do NOT remove_giveaway here. Any unpaid claims for this
+        # giveaway live in the giveaway_claims collection and still need to be
+        # payable after the claim window closes. Deleting the giveaway record
+        # used to make it vanish from active_giveaways, which made the AI
+        # agent's "list unpaid claims" tooling blind to it. Just flag it as
+        # claim-expired so this loop doesn't keep re-processing it, and leave
+        # the record (and its claims) in place until /giveaway delete is used.
+        giveaway.claim_expired = True
+        self.giveaway_data.add_giveaway(message_id, giveaway)
 
     async def end_giveaway(self, message_id: int, giveaway: Giveaway):
         giveaway.ended = True
