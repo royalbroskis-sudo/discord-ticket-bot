@@ -12,16 +12,26 @@
       padding: 24px;
       overflow: auto;
     }
-    .card {
-      display: block; /* override the shared .card{display:none} tab-panel rule from style.css */
+    .layout {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 24px;
+      width: 100%;
+      max-width: 1120px;
+      margin: 0 auto;
+    }
+    .mc-card {
+      display: block;
       background: var(--bg-surface); border: 1px solid var(--border);
       border-radius: var(--r-xl); padding: 44px 36px;
-      width: 100%; max-width: 480px; text-align: center;
+      width: 100%; max-width: 380px; flex: 0 0 380px; text-align: center;
       position: relative; overflow: hidden;
       box-shadow: var(--shadow-soft);
       animation: cardIn 0.4s var(--transition-slow) both;
+      order: 2;
     }
-    .card::before {
+    .mc-card::before {
       content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
       background: linear-gradient(90deg, transparent, var(--accent), transparent);
     }
@@ -83,12 +93,192 @@
     .btn-signout   { background: var(--danger-tint); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
     .btn-signout:hover:not(:disabled) { background: rgba(239,68,68,0.18); box-shadow: 0 4px 14px rgba(239,68,68,0.2); }
 
+    .schedule-section {
+      margin-top: 20px;
+      padding: 16px;
+      background: var(--bg-muted);
+      border-radius: var(--r-lg);
+      border: 1px solid var(--border);
+      text-align: left;
+    }
+    .schedule-section h3 {
+      color: var(--text-bright);
+      font-size: 16px;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+    .schedule-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      background: var(--input-bg);
+      border-radius: var(--r-sm);
+      margin-bottom: 6px;
+      font-size: 13px;
+      gap: 8px;
+    }
+    .schedule-item .cmd {
+      color: var(--accent-light);
+      font-family: monospace;
+      flex: 1;
+    }
+    .schedule-item .interval {
+      color: var(--text-muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .schedule-item .btn-sm {
+      padding: 4px 12px;
+      font-size: 11px;
+      border: none;
+      border-radius: var(--r-sm);
+      cursor: pointer;
+      background: var(--danger-tint);
+      color: #f87171;
+      transition: all var(--transition);
+    }
+    .schedule-item .btn-sm:hover {
+      background: rgba(239,68,68,0.2);
+    }
+    .schedule-form {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .schedule-form input {
+      flex: 1;
+      min-width: 100px;
+      padding: 8px 12px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--text-main);
+      font-size: 13px;
+    }
+    .schedule-form input::placeholder {
+      color: var(--text-faint);
+    }
+    .schedule-form .btn-add {
+      padding: 8px 16px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--r-sm);
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+      transition: all var(--transition);
+    }
+    .schedule-form .btn-add:hover {
+      background: var(--accent-mid);
+    }
+    .schedule-empty {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+      padding: 8px 0;
+    }
+
     .hint { margin-top:22px; font-size:11.5px; color: var(--text-faint); line-height:1.8; text-align: left; }
     .hint code { color: var(--accent-light); background: var(--accent-tint); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+
+    .console-section {
+      order: 1;
+      flex: 1 1 640px;
+      max-width: 700px;
+      min-width: 0;
+      align-self: stretch;
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: var(--r-xl);
+      padding: 28px 26px;
+      text-align: left;
+      box-shadow: var(--shadow-soft);
+      display: flex;
+      flex-direction: column;
+      animation: cardIn 0.4s var(--transition-slow) both;
+    }
+    .console-section h3 {
+      color: var(--text-bright);
+      font-size: 17px;
+      margin-bottom: 14px;
+      text-align: left;
+    }
+    .console-log {
+      flex: 1 1 auto;
+      height: min(64vh, 620px);
+      overflow-y: auto;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      padding: 10px 12px;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .console-log .line { word-break: break-word; white-space: pre-wrap; }
+    .console-log .line.sent   { color: var(--accent-light); }
+    .console-log .line.auto   { color: #fb923c; }
+    .console-log .line.system { color: #fbbf24; font-style: italic; }
+    .console-log .line.game   { color: var(--text-main); }
+    .console-log .empty { color: var(--text-faint); text-align: center; padding: 8px 0; }
+    .console-log .ts { color: var(--text-faint); margin-right: 6px; }
+
+    .console-form {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .console-form input {
+      flex: 1;
+      padding: 10px 12px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--text-main);
+      font-size: 13px;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+    }
+    .console-form input::placeholder { color: var(--text-faint); }
+    .console-form .btn-send {
+      padding: 10px 20px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--r-sm);
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+      transition: all var(--transition);
+    }
+    .console-form .btn-send:hover:not(:disabled) { background: var(--accent-mid); }
+    .console-form .btn-send:disabled { opacity: .4; cursor: not-allowed; }
+
+    @media (max-width: 900px) {
+      .layout { flex-direction: column; align-items: stretch; }
+      .mc-card { order: 1; max-width: 100%; flex: 0 0 auto; }
+      .console-section { order: 2; max-width: 100%; flex: 0 0 auto; }
+      .console-log { height: 320px; }
+    }
   </style>
 </head>
 <body>
-<div class="card">
+<div class="layout">
+  <!-- Live Console (left, large) -->
+  <div id="console-section" class="console-section" style="display:none">
+    <h3>🖥️ Live Console</h3>
+    <div id="console-log" class="console-log"><div class="empty">Waiting for activity…</div></div>
+    <div class="console-form">
+      <input id="console-input" placeholder="Type a chat message or /command and press Enter" />
+      <button id="console-send" class="btn-send" onclick="sendConsole()">Send</button>
+    </div>
+  </div>
+
+  <div class="mc-card">
   <div class="icon">🎮</div>
   <h1>Link Your Minecraft Account</h1>
   <p class="sub">Link your own Microsoft account to DonutSMP. This is tied to your Discord account only — nobody else can see or control it. No passwords stored, only a secure session token.</p>
@@ -120,6 +310,18 @@
   <button id="btn-leave"   class="btn btn-leave"   onclick="leaveServer()" style="display:none">Leave Server</button>
   <button id="btn-signout" class="btn btn-signout" onclick="fullLogout()"  style="display:none">Unlink (clear token)</button>
 
+  <!-- Schedule Section -->
+  <div id="schedule-section" class="schedule-section" style="display:none">
+    <h3>⏰ Scheduled Commands</h3>
+    <div id="schedule-list"><div class="schedule-empty">Loading...</div></div>
+    
+    <div class="schedule-form">
+      <input id="schedule-cmd" placeholder="Command (e.g., /home 2)" />
+      <input id="schedule-interval" placeholder="Interval (e.g., 30m, 1h)" style="flex:0.5;min-width:80px" />
+      <button class="btn-add" onclick="addSchedule()">+ Add</button>
+    </div>
+  </div>
+
   <p class="hint">
     <strong>Link My Account</strong> — signs in with your own Microsoft account and keeps you connected.<br>
     <strong>Leave Server</strong> — disconnects but keeps your link saved, reconnects automatically.<br>
@@ -127,8 +329,11 @@
     You can also do all of this from Discord with <code>/link</code>, <code>/mcstatus</code>, and <code>/unlink</code>.
   </p>
 </div>
+</div>
 
 <script>
+  let currentDiscordId = null;
+
   async function fetchStatus() {
     try {
       const r = await fetch('/mc-status')
@@ -148,6 +353,8 @@
     const btnLeave   = document.getElementById('btn-leave')
     const btnSignout = document.getElementById('btn-signout')
     const mcUsername = document.getElementById('mc-username')
+    const scheduleSection = document.getElementById('schedule-section')
+    const consoleSection  = document.getElementById('console-section')
 
     // Reset everything
     badge.className        = 'badge'
@@ -159,6 +366,9 @@
     btnLeave.style.display   = 'none'
     btnSignout.style.display = 'none'
     mcUsername.style.display = 'none'
+    scheduleSection.style.display = 'none'
+    consoleSection.style.display = 'none'
+    if (s.status !== 'ready') stopConsolePolling()
 
     if (s.status === 'ready') {
       badge.classList.add('ready')
@@ -170,6 +380,15 @@
         mcUsername.textContent   = `Playing as ${s.mcUsername}`
         mcUsername.style.display = 'block'
       }
+      // Show schedule section when connected
+      if (s.discordId) {
+        currentDiscordId = s.discordId
+        scheduleSection.style.display = 'block'
+        loadSchedule()
+      }
+      // Show live console when connected
+      consoleSection.style.display = 'block'
+      startConsolePolling()
 
     } else if (s.status === 'awaiting_auth') {
       badge.classList.add('awaiting_auth')
@@ -203,7 +422,10 @@
     }
   }
 
-  async function poll() { applyStatus(await fetchStatus()) }
+  async function poll() { 
+    const status = await fetchStatus()
+    applyStatus(status) 
+  }
 
   async function startLogin() {
     document.getElementById('btn-login').disabled = true
@@ -226,6 +448,194 @@
     await fetch('/mc-full-logout', { method: 'POST' })
     setTimeout(poll, 500)
   }
+
+  // ── Schedule Management ────────────────────────────────────────────────────
+
+  async function loadSchedule() {
+    if (!currentDiscordId) return
+    try {
+      const r = await fetch('/mc-schedule/' + currentDiscordId)
+      const data = await r.json()
+      if (data.ok) {
+        renderSchedule(data.commands || [])
+      } else {
+        document.getElementById('schedule-list').innerHTML = 
+          '<div class="schedule-empty">⚠️ ' + (data.error || 'Failed to load') + '</div>'
+      }
+    } catch (e) {
+      document.getElementById('schedule-list').innerHTML = 
+        '<div class="schedule-empty">⚠️ Failed to load schedule</div>'
+    }
+  }
+
+  function renderSchedule(commands) {
+    const container = document.getElementById('schedule-list')
+    if (!commands || !commands.length) {
+      container.innerHTML = '<div class="schedule-empty">No scheduled commands.</div>'
+      return
+    }
+    container.innerHTML = commands.map(cmd => `
+      <div class="schedule-item">
+        <span class="cmd">${escapeHtml(cmd.command)}</span>
+        <span class="interval">every ${formatInterval(cmd.interval)}</span>
+        <button class="btn-sm" onclick="disableSchedule('${escapeHtml(cmd.command)}')">✕</button>
+      </div>
+    `).join('')
+  }
+
+  function formatInterval(ms) {
+    const mins = ms / 60000
+    if (mins >= 1440) return (mins/1440).toFixed(1) + 'd'
+    if (mins >= 60) return (mins/60).toFixed(1) + 'h'
+    return mins.toFixed(0) + 'm'
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div')
+    div.textContent = text
+    return div.innerHTML
+  }
+
+  async function addSchedule() {
+    const cmd = document.getElementById('schedule-cmd').value.trim()
+    const interval = document.getElementById('schedule-interval').value.trim()
+    if (!cmd || !interval) {
+      alert('Please enter both a command and interval.')
+      return
+    }
+    const intervalMs = parseInterval(interval)
+    if (!intervalMs || intervalMs < 60000) {
+      alert('Interval must be at least 60 seconds (e.g., 1m, 5m, 1h)')
+      return
+    }
+    try {
+      const r = await fetch('/mc-schedule/' + currentDiscordId, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command: cmd, interval: intervalMs})
+      })
+      const data = await r.json()
+      if (data.ok) {
+        document.getElementById('schedule-cmd').value = ''
+        document.getElementById('schedule-interval').value = ''
+        loadSchedule()
+      } else {
+        alert('Error: ' + (data.error || 'Unknown'))
+      }
+    } catch (e) {
+      alert('Error: ' + e.message)
+    }
+  }
+
+  function parseInterval(str) {
+    const match = str.match(/^(\d+)([smhd])$/i)
+    if (!match) return null
+    const val = parseInt(match[1])
+    const unit = match[2].toLowerCase()
+    const map = {s: 1000, m: 60000, h: 3600000, d: 86400000}
+    return val * (map[unit] || 0)
+  }
+
+  async function disableSchedule(command) {
+    if (!confirm(`Disable scheduled command: ${command}?`)) return
+    try {
+      const r = await fetch('/mc-schedule/disable/' + currentDiscordId, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command})
+      })
+      const data = await r.json()
+      if (data.ok) {
+        loadSchedule()
+      } else {
+        alert('Error: ' + (data.error || 'Unknown'))
+      }
+    } catch (e) {
+      alert('Error: ' + e.message)
+    }
+  }
+
+  // ── Live Console ────────────────────────────────────────────────────────────
+
+  let consoleAfterId = 0
+  let consoleTimer = null
+
+  function startConsolePolling() {
+    if (consoleTimer) return // already running
+    pollConsole()
+    consoleTimer = setInterval(pollConsole, 1500)
+  }
+
+  function stopConsolePolling() {
+    if (consoleTimer) { clearInterval(consoleTimer); consoleTimer = null }
+  }
+
+  async function pollConsole() {
+    try {
+      const r = await fetch('/mc-chat?after=' + consoleAfterId)
+      const data = await r.json()
+      if (data.ok) {
+        appendConsoleLines(data.messages || [])
+        if (typeof data.lastId === 'number') consoleAfterId = data.lastId
+      }
+    } catch (e) {
+      // Silent — the regular status poll will surface connectivity issues.
+    }
+  }
+
+  function appendConsoleLines(messages) {
+    if (!messages.length) return
+    const log = document.getElementById('console-log')
+    const empty = log.querySelector('.empty')
+    if (empty) empty.remove()
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30
+    for (const m of messages) {
+      const div = document.createElement('div')
+      div.className = 'line ' + (m.type || 'game')
+      const time = new Date(m.ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      div.innerHTML = `<span class="ts">${time}</span>${escapeHtml(m.text)}`
+      log.appendChild(div)
+    }
+    // Trim old lines client-side so the DOM doesn't grow unbounded
+    while (log.children.length > 300) log.removeChild(log.firstChild)
+    if (atBottom) log.scrollTop = log.scrollHeight
+  }
+
+  async function sendConsole() {
+    const input = document.getElementById('console-input')
+    const btn = document.getElementById('console-send')
+    const message = input.value.trim()
+    if (!message) return
+    btn.disabled = true
+    try {
+      const r = await fetch('/mc-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message })
+      })
+      const data = await r.json()
+      if (data.ok) {
+        input.value = ''
+        pollConsole()
+      } else {
+        alert('Error: ' + (data.error || 'Failed to send'))
+      }
+    } catch (e) {
+      alert('Error: ' + e.message)
+    } finally {
+      btn.disabled = false
+      input.focus()
+    }
+  }
+
+  document.getElementById('console-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      sendConsole()
+    }
+  })
+
+  // ── Start polling ──────────────────────────────────────────────────────────
 
   poll()
   setInterval(poll, 3000)

@@ -1109,6 +1109,33 @@ def mc_run_command():
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
+@app.route("/mc-chat")
+def mc_chat_get():
+    # Live console poll — anything newer than ?after=<lastId>
+    discord_id = _current_discord_id()
+    if not discord_id:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    after = request.args.get("after", 0)
+    try:
+        r = requests.get(f"{MC_BOT_URL}/chat/{discord_id}", params={"after": after}, timeout=5)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
+@app.route("/mc-chat", methods=["POST"])
+def mc_chat_post():
+    # Send a raw chat line / command as the logged-in user's own linked account
+    discord_id = _current_discord_id()
+    if not discord_id:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        r = requests.post(f"{MC_BOT_URL}/chat/{discord_id}", json=request.get_json(silent=True) or {}, timeout=10)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
 # ── ADD THESE ROUTES TO app.py ────────────────────────────────────────────────
 # Paste before the `if __name__ == "__main__":` line
 # These handle the ticket type + panel builder at /dashboard/<guild_id>/tickets
@@ -1889,6 +1916,78 @@ def chat_delete_message(guild_id):
     if not ok:
         return jsonify({"ok": False, "error": _discord_err(r)}), r.status_code
     return jsonify({"ok": True})
+
+# app.py - Add these routes near the other MC routes
+
+@app.route("/mc-schedule/<discord_id>", methods=["GET"])
+def mc_get_schedule(discord_id):
+    """Get all scheduled commands for a user."""
+    if "access_token" not in session:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    
+    # Verify this is the logged-in user
+    current_id = _current_discord_id()
+    if not current_id or current_id != discord_id:
+        return jsonify({"ok": False, "error": "Forbidden"}), 403
+    
+    try:
+        r = requests.get(f"{MC_BOT_URL}/schedule/{discord_id}", timeout=5)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+@app.route("/mc-schedule/<discord_id>", methods=["POST"])
+def mc_add_schedule(discord_id):
+    """Add a scheduled command."""
+    if "access_token" not in session:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    
+    current_id = _current_discord_id()
+    if not current_id or current_id != discord_id:
+        return jsonify({"ok": False, "error": "Forbidden"}), 403
+    
+    data = request.get_json(silent=True) or {}
+    command = data.get("command")
+    interval = data.get("interval")
+    
+    if not command or not interval:
+        return jsonify({"ok": False, "error": "Command and interval required"}), 400
+    
+    try:
+        r = requests.post(
+            f"{MC_BOT_URL}/schedule/{discord_id}",
+            json={"command": command, "interval": interval},
+            timeout=10
+        )
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+@app.route("/mc-schedule/disable/<discord_id>", methods=["POST"])
+def mc_disable_schedule(discord_id):
+    """Disable a scheduled command."""
+    if "access_token" not in session:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    
+    current_id = _current_discord_id()
+    if not current_id or current_id != discord_id:
+        return jsonify({"ok": False, "error": "Forbidden"}), 403
+    
+    data = request.get_json(silent=True) or {}
+    command = data.get("command")
+    
+    if not command:
+        return jsonify({"ok": False, "error": "Command required"}), 400
+    
+    try:
+        r = requests.post(
+            f"{MC_BOT_URL}/schedule/disable/{discord_id}",
+            json={"command": command},
+            timeout=10
+        )
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
 
 
 if __name__ == "__main__":
