@@ -24,6 +24,9 @@
     <div class="nav-item" onclick="switchTab('automod', this)">🛡️ AutoMod</div>
     <div class="nav-item" onclick="switchTab('config', this)">⚙️ Roles & Config</div>
     <div class="nav-item" onclick="window.location.href='/dashboard/{{ guild_id }}/commands'">🔑 Command Permissions</div>
+    <div class="nav-item" onclick="switchTab('staffactivity', this)">💎 Staff Activity</div>
+    <div class="nav-item" onclick="switchTab('staffpoints', this)">🏆 Staff Points</div>
+    <div class="nav-item" onclick="window.location.href='/dashboard/{{ guild_id }}/staffpoints'">📊 Staff Points Leaderboard</div>
 
     <div class="nav-category">Tickets & Apps</div>
     <div class="nav-item" onclick="switchTab('applications', this)">📝 Applications</div>
@@ -42,6 +45,7 @@
     <div class="nav-category">Utility</div>
     <div class="nav-item" onclick="switchTab('announcement', this)">📢 Announcement</div>
     <div class="nav-item" onclick="switchTab('building', this)">🏗️ Building</div>
+    <div class="nav-item" onclick="switchTab('spawners', this)">🥚 Spawners</div>
 
     <a class="nav-item logout" href="/logout">🚪 Log Out</a>
 </div>
@@ -147,6 +151,91 @@
             </form>
         </div>
 
+        <!-- STAFF ACTIVITY CARD -->
+        <div id="staffactivity" class="card">
+            <h3>💎 Staff Activity Check</h3>
+            <p>Every X days, pings a role in a channel and asks them to react within a time window to confirm they're active. Anyone who doesn't react gets listed in a results report.</p>
+            <form method="POST">
+                <input type="hidden" name="form_type" value="staff_activity_config">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="sa_enabled" name="staff_activity_enabled" {% if settings.staff_activity and settings.staff_activity.ENABLED %}checked{% endif %}>
+                    <label for="sa_enabled">Enabled</label>
+                </div>
+                <div class="form-group">
+                    <label>Role to Check</label>
+                    <select name="STAFF_ACTIVITY_ROLE_ID">
+                        <option value="none" {% if not settings.staff_activity or not settings.staff_activity.CHECK_ROLE_ID %}selected{% endif %}>Not set</option>
+                        {% for role in roles|sort(attribute='position', reverse=True) %}
+                        <option value="{{ role.id }}" {% if settings.staff_activity and settings.staff_activity.CHECK_ROLE_ID and settings.staff_activity.CHECK_ROLE_ID|string == role.id|string %}selected{% endif %}>{{ role.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Every member with this role is expected to react.</span>
+                </div>
+                <div class="form-group">
+                    <label>Channel</label>
+                    <select name="STAFF_ACTIVITY_CHANNEL_ID">
+                        <option value="none" {% if not settings.staff_activity or not settings.staff_activity.CHANNEL_ID %}selected{% endif %}>Not set</option>
+                        {% for channel in channels|sort(attribute='position') %}
+                        <option value="{{ channel.id }}" {% if settings.staff_activity and settings.staff_activity.CHANNEL_ID and settings.staff_activity.CHANNEL_ID|string == channel.id|string %}selected{% endif %}># {{ channel.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Where the check and results are posted.</span>
+                </div>
+                <div class="form-group">
+                    <label>Check Interval (days)</label>
+                    <input type="number" min="1" max="90" name="STAFF_ACTIVITY_INTERVAL_DAYS" value="{% if settings.staff_activity and settings.staff_activity.INTERVAL_DAYS %}{{ settings.staff_activity.INTERVAL_DAYS }}{% else %}2{% endif %}">
+                </div>
+                <div class="form-group">
+                    <label>Reaction Window (hours)</label>
+                    <input type="number" min="1" max="168" name="STAFF_ACTIVITY_WINDOW_HOURS" value="{% if settings.staff_activity and settings.staff_activity.WINDOW_HOURS %}{{ settings.staff_activity.WINDOW_HOURS }}{% else %}24{% endif %}">
+                </div>
+                <div class="form-group">
+                    <label>Reaction Emoji</label>
+                    <input type="text" name="STAFF_ACTIVITY_EMOJI" maxlength="8" value="{% if settings.staff_activity and settings.staff_activity.EMOJI %}{{ settings.staff_activity.EMOJI }}{% else %}💎{% endif %}">
+                    <span class="helper-text">Standard Unicode emoji only (custom server emoji aren't supported here).</span>
+                </div>
+                <button type="submit">Save Staff Activity Settings</button>
+            </form>
+        </div>
+
+        <!-- STAFF POINTS CARD -->
+        <div id="staffpoints" class="card">
+            <h3>🏆 Staff Points</h3>
+            <p>Controls how many points each staff action is worth. Points feed the <code>/staffstats</code> leaderboard and the
+                <a href="/dashboard/{{ guild_id }}/staffpoints">full Staff Points Leaderboard page</a>.
+                Changing a value only affects points earned going forward — past totals don't shift retroactively.</p>
+            <form method="POST">
+                <input type="hidden" name="form_type" value="staff_points_config">
+                <div class="form-group">
+                    <label>Message outside a ticket</label>
+                    <input type="number" step="0.01" min="0" name="PTS_MSG_OUTSIDE"
+                           value="{{ settings.staff_points_weights.PTS_MSG_OUTSIDE if settings.staff_points_weights else 0.05 }}">
+                </div>
+                <div class="form-group">
+                    <label>Message inside a ticket</label>
+                    <input type="number" step="0.01" min="0" name="PTS_MSG_TICKET"
+                           value="{{ settings.staff_points_weights.PTS_MSG_TICKET if settings.staff_points_weights else 0.25 }}">
+                </div>
+                <div class="form-group">
+                    <label>Ticket renamed</label>
+                    <input type="number" step="0.01" min="0" name="PTS_TICKET_RENAME"
+                           value="{{ settings.staff_points_weights.PTS_TICKET_RENAME if settings.staff_points_weights else 20 }}">
+                </div>
+                <div class="form-group">
+                    <label>Ticket closed</label>
+                    <input type="number" step="0.01" min="0" name="PTS_TICKET_CLOSE"
+                           value="{{ settings.staff_points_weights.PTS_TICKET_CLOSE if settings.staff_points_weights else 15 }}">
+                </div>
+                <div class="form-group">
+                    <label>Moderation action (mute/kick/ban/warn/etc.)</label>
+                    <input type="number" step="0.01" min="0" name="PTS_MOD_ACTION"
+                           value="{{ settings.staff_points_weights.PTS_MOD_ACTION if settings.staff_points_weights else 30 }}">
+                </div>
+                <button type="submit">Save Staff Points Settings</button>
+            </form>
+        </div>
+
+
         <!-- CONFIG & ROLES CARD -->
         <div id="config" class="card">
             <h3>Bot Config & Role Names</h3>
@@ -226,6 +315,36 @@
                         {% endfor %}
                     </select>
                     <span class="helper-text">Where winners are asked to leave a vouch after their giveaway prize is paid out.</span>
+                </div>
+                <div class="form-group">
+                    <label>Building Ticket Category</label>
+                    <select name="BUILDING_CATEGORY_ID">
+                        <option value="none" {% if not settings.config or not settings.config.BUILDING_CATEGORY_ID %}selected{% endif %}>Auto-create "Building"</option>
+                        {% for category in categories|sort(attribute='position') %}
+                        <option value="{{ category.id }}" {% if settings.config and settings.config.BUILDING_CATEGORY_ID and settings.config.BUILDING_CATEGORY_ID|string == category.id|string %}selected{% endif %}>{{ category.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Category new build tickets are created under. If left on auto-create, the bot will make (or reuse) a category named "Building".</span>
+                </div>
+                <div class="form-group">
+                    <label>Application Ticket Category</label>
+                    <select name="APPLICATION_CATEGORY_ID">
+                        <option value="none" {% if not settings.config or not settings.config.APPLICATION_CATEGORY_ID %}selected{% endif %}>Auto-create "Application Tickets"</option>
+                        {% for category in categories|sort(attribute='position') %}
+                        <option value="{{ category.id }}" {% if settings.config and settings.config.APPLICATION_CATEGORY_ID and settings.config.APPLICATION_CATEGORY_ID|string == category.id|string %}selected{% endif %}>{{ category.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Category application discussion tickets are created under.</span>
+                </div>
+                <div class="form-group">
+                    <label>Giveaway Claim Ticket Category</label>
+                    <select name="CLAIM_CATEGORY_ID">
+                        <option value="none" {% if not settings.config or not settings.config.CLAIM_CATEGORY_ID %}selected{% endif %}>Auto-create "Claim Tickets"</option>
+                        {% for category in categories|sort(attribute='position') %}
+                        <option value="{{ category.id }}" {% if settings.config and settings.config.CLAIM_CATEGORY_ID and settings.config.CLAIM_CATEGORY_ID|string == category.id|string %}selected{% endif %}>{{ category.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Category giveaway prize-claim tickets are created under.</span>
                 </div>
                 <button type="submit">Save Config</button>
             </form>
@@ -335,7 +454,7 @@
                         <option value="{{ role.id }}" {% if settings.building.config and settings.building.config.BUILD_TICKET_PING_ROLE_ID|string == role.id|string %}selected{% endif %}>{{ role.name }}</option>
                         {% endfor %}
                     </select>
-                    <span class="helper-text">Role that can confirm payment and gets pinged in the ticket. Usually "295".</span>
+                    <span class="helper-text">Role that can confirm payment and gets pinged in the ticket.</span>
                 </div>
                 
                 <div class="form-group">
@@ -442,6 +561,143 @@
             </script>
         </div>
 
+        <!-- SPAWNER EMBED / SPAWNER TICKET MANAGER CARD -->
+        <div id="spawners" class="card">
+            <h3>Spawner Embed / Spawner Ticket Manager</h3>
+            <p>Add spawner types with buy/sell prices, then send the price panel to a channel. Clicking Buy/Sell Spawners opens a ticket, pings the roles below, and auto-calculates the total.</p>
+
+            <!-- Spawner Types List -->
+            <h4>Spawner Types</h4>
+            <div id="spawnerTypesList">
+                {% for t in settings.spawners.types %}
+                <div style="background:var(--input-bg); padding:15px; border-radius:6px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <strong>{{ t.emoji }} {{ t.name }}</strong>
+                        — Buy: {{ '%.2f'|format(t.buy_price) if t.buy_price is not none else 0 }} &nbsp;|&nbsp; Sell: {{ '%.2f'|format(t.sell_price) if t.sell_price is not none else 0 }}
+                    </div>
+                    <div>
+                        <button type="button" onclick="editSpawnerType('{{ t.id }}', '{{ t.name|e }}', '{{ t.emoji|e }}', '{{ t.buy_price }}', '{{ t.sell_price }}')" style="background:var(--accent); font-size:12px; padding:5px 10px; margin-right:5px;">Edit</button>
+                        <form method="POST" style="display:inline;" onsubmit="return confirm('Delete this spawner type?')">
+                            <input type="hidden" name="form_type" value="delete_spawner_type">
+                            <input type="hidden" name="delete_spawner_id" value="{{ t.id }}">
+                            <button type="submit" class="danger" style="background:var(--danger); font-size:12px; padding:5px 10px;">Delete</button>
+                        </form>
+                    </div>
+                </div>
+                {% endfor %}
+                {% if not settings.spawners.types %}
+                <p style="color:var(--text-muted)">No spawner types added yet.</p>
+                {% endif %}
+            </div>
+
+            <!-- Add Spawner Type Form -->
+            <form method="POST" style="margin-top:20px;">
+                <input type="hidden" name="form_type" value="add_spawner_type">
+                <div class="form-group"><label>Spawner Type Name</label><input type="text" name="spawner_name" placeholder="e.g. Skeleton" required></div>
+                <div class="form-group"><label>Emoji</label><input type="text" name="spawner_emoji" placeholder="e.g. 💀"></div>
+                <div class="form-group"><label>Buy Price (each, any format e.g. 5.5m)</label><input type="text" name="spawner_buy_price" placeholder="5.5m" required></div>
+                <div class="form-group"><label>Sell Price (each, any format e.g. 6.2m)</label><input type="text" name="spawner_sell_price" placeholder="6.2m" required></div>
+                <button type="submit">Add Spawner Type</button>
+            </form>
+
+            <!-- Edit Spawner Type Modal -->
+            <div id="editSpawnerModal" style="display:none; background:var(--bg-card); padding:20px; border-radius:8px; margin-top:20px;">
+                <h4>Edit Spawner Type</h4>
+                <form method="POST" id="editSpawnerForm">
+                    <input type="hidden" name="form_type" value="update_spawner_type">
+                    <input type="hidden" name="edit_spawner_id" id="edit_spawner_id">
+                    <div class="form-group"><label>Name</label><input type="text" name="spawner_name" id="edit_spawner_name" required></div>
+                    <div class="form-group"><label>Emoji</label><input type="text" name="spawner_emoji" id="edit_spawner_emoji"></div>
+                    <div class="form-group"><label>Buy Price</label><input type="text" name="spawner_buy_price" id="edit_spawner_buy_price" required></div>
+                    <div class="form-group"><label>Sell Price</label><input type="text" name="spawner_sell_price" id="edit_spawner_sell_price" required></div>
+                    <button type="submit">Update Spawner Type</button>
+                    <button type="button" onclick="document.getElementById('editSpawnerModal').style.display='none'" style="background:var(--bg-muted); color:var(--text-main);">Cancel</button>
+                </form>
+            </div>
+
+            <script>
+                function editSpawnerType(id, name, emoji, buyPrice, sellPrice) {
+                    document.getElementById('edit_spawner_id').value = id;
+                    document.getElementById('edit_spawner_name').value = name;
+                    document.getElementById('edit_spawner_emoji').value = emoji || '';
+                    document.getElementById('edit_spawner_buy_price').value = buyPrice;
+                    document.getElementById('edit_spawner_sell_price').value = sellPrice;
+                    document.getElementById('editSpawnerModal').style.display = 'block';
+                    document.getElementById('editSpawnerModal').scrollIntoView({behavior:'smooth'});
+                }
+            </script>
+
+            <hr>
+
+            <!-- Panel Config: category + ping roles -->
+            <h4>Ticket Settings</h4>
+            <form method="POST">
+                <input type="hidden" name="form_type" value="spawner_config">
+                <div class="form-group">
+                    <label>Ticket Category</label>
+                    <select name="SPAWNER_CATEGORY_ID">
+                        <option value="none" {% if not settings.spawners.config or not settings.spawners.config.CATEGORY_ID %}selected{% endif %}>Auto-create "Spawner Tickets"</option>
+                        {% for category in categories|sort(attribute='position') %}
+                        <option value="{{ category.id }}" {% if settings.spawners.config and settings.spawners.config.CATEGORY_ID and settings.spawners.config.CATEGORY_ID|string == category.id|string %}selected{% endif %}>{{ category.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Category new spawner tickets are created under.</span>
+                </div>
+                <div class="form-group">
+                    <label>Default Panel Channel</label>
+                    <select name="SPAWNER_PANEL_CHANNEL_ID">
+                        <option value="none" {% if not settings.spawners.config or not settings.spawners.config.PANEL_CHANNEL_ID %}selected{% endif %}>Not set</option>
+                        {% for channel in channels|sort(attribute='position') %}
+                        <option value="{{ channel.id }}" {% if settings.spawners.config and settings.spawners.config.PANEL_CHANNEL_ID and settings.spawners.config.PANEL_CHANNEL_ID|string == channel.id|string %}selected{% endif %}># {{ channel.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="helper-text">Remembered as the last channel the price panel was sent to.</span>
+                </div>
+                <div class="form-group">
+                    <label>Buy Ticket Ping Roles (Hold Ctrl/Cmd to select multiple)</label>
+                    <div class="multiselect-container" style="max-height:150px; overflow-y:auto; background-color:var(--input-bg); border-radius:6px; padding:12px; border:1px solid var(--border);">
+                        {% for role in roles|sort(attribute='position', reverse=True) %}
+                        <label style="display:flex; gap:10px; margin-bottom:5px; cursor:pointer; font-weight:normal; text-transform:none;">
+                            <input type="checkbox" name="SPAWNER_BUY_PING_ROLE_IDS" value="{{ role.id }}" {% if settings.spawners.config and role.id|string in settings.spawners.config.BUY_PING_ROLE_IDS|map('string')|list %}checked{% endif %}> {{ role.name }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <span class="helper-text">Pinged in the channel when someone opens a Buy Spawners ticket.</span>
+                </div>
+                <div class="form-group">
+                    <label>Sell Ticket Ping Roles (Hold Ctrl/Cmd to select multiple)</label>
+                    <div class="multiselect-container" style="max-height:150px; overflow-y:auto; background-color:var(--input-bg); border-radius:6px; padding:12px; border:1px solid var(--border);">
+                        {% for role in roles|sort(attribute='position', reverse=True) %}
+                        <label style="display:flex; gap:10px; margin-bottom:5px; cursor:pointer; font-weight:normal; text-transform:none;">
+                            <input type="checkbox" name="SPAWNER_SELL_PING_ROLE_IDS" value="{{ role.id }}" {% if settings.spawners.config and role.id|string in settings.spawners.config.SELL_PING_ROLE_IDS|map('string')|list %}checked{% endif %}> {{ role.name }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <span class="helper-text">Pinged in the channel when someone opens a Sell Spawners ticket.</span>
+                </div>
+                <button type="submit">Save Ticket Settings</button>
+            </form>
+
+            <hr>
+
+            <!-- Send Panel -->
+            <h4>Send Spawner Panel</h4>
+            <form method="POST">
+                <input type="hidden" name="form_type" value="send_spawner_panel">
+                <div class="form-group">
+                    <label>Channel</label>
+                    <select name="spawner_send_channel_id" required>
+                        <option value="" disabled {% if not settings.spawners.config or not settings.spawners.config.PANEL_CHANNEL_ID %}selected{% endif %}>Select a channel...</option>
+                        {% for channel in channels|sort(attribute='position') %}
+                        <option value="{{ channel.id }}" {% if settings.spawners.config and settings.spawners.config.PANEL_CHANNEL_ID and settings.spawners.config.PANEL_CHANNEL_ID|string == channel.id|string %}selected{% endif %}># {{ channel.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button type="submit" {% if not settings.spawners.types %}disabled{% endif %}>Send Spawner Panel</button>
+                {% if not settings.spawners.types %}<span class="helper-text">Add at least one spawner type above first.</span>{% endif %}
+            </form>
+        </div>
+
     </div>
 </div>
 
@@ -468,3 +724,5 @@
 
 </body>
 </html>
+
+

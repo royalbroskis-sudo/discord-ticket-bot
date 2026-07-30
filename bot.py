@@ -30,6 +30,7 @@ COGS = [
     'cogs.giveaway_payment',  # <-- ADDED: Payment system
     'cogs.sticky',
     'cogs.building',
+    'cogs.spawners',
     'cogs.reactionroles',
     'cogs.welcome',
     'cogs.automod',
@@ -37,6 +38,10 @@ COGS = [
     'cogs.autorole',
     'cogs.applications',
     'cogs.staff_utils',
+    'cogs.utilities',
+    'cogs.staff_activity',
+    'cogs.staff_points',
+    'cogs.strikes',
     'cogs.afk',
     'cogs.mc_link',
     'cogs.invites',
@@ -203,3 +208,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+

@@ -4,6 +4,7 @@ from discord import app_commands
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from cogs.config import mod_only, admin_only, staff_only, get_guild_config
+from cogs.staff_points import log_event
 import asyncio
 import re
 import requests
@@ -344,6 +345,7 @@ class StaffUtils(commands.Cog):
         embed.add_field(name="Reason", value=reason, inline=True)
         embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
         await interaction.response.send_message(embed=embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
     @app_commands.command(name="multiban", description="Ban multiple users at once")
     @app_commands.describe(users="Comma-separated user IDs or mentions", reason="Reason")
@@ -375,6 +377,7 @@ class StaffUtils(commands.Cog):
                 try:
                     await interaction.guild.ban(discord.Object(id=uid), reason=reason)
                     success.append(str(uid))
+                    log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
                 except:
                     failed.append(str(uid))
             else:
@@ -384,6 +387,7 @@ class StaffUtils(commands.Cog):
                     try:
                         await user.ban(reason=reason)
                         success.append(user.name)
+                        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
                     except:
                         failed.append(user.name)
         
@@ -427,6 +431,7 @@ class StaffUtils(commands.Cog):
             try:
                 await member.timeout(until, reason=reason)
                 success.append(member.name)
+                log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
             except:
                 failed.append(member.name)
         
@@ -637,3 +642,5 @@ class StaffUtils(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(StaffUtils(bot))
+
+

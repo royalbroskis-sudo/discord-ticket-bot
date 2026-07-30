@@ -14,27 +14,13 @@ import discord
 from discord import app_commands
 
 # ---------------------------------------------------------------------------
-# Ticket seller roles & Builder roles (Needed for Cogs)
-# These are unrelated to the dashboard-configured Staff/Mod/Admin/Trusted
-# Staff roles above, and are still matched by name.
+# Everything that used to be hardcoded here (seller/builder role names, the
+# mod-logs channel name, ticket category names, etc.) is now configured on
+# the Web Dashboard and read dynamically via get_guild_config() below.
 # ---------------------------------------------------------------------------
 
-BASE_BUYING_ROLE  = "Base Seller"
-BEDROCK_ROLE      = "Bedrock Seller"
-SPAWNER_ROLE      = "Spawner Trader"
-BUILDING_ROLE     = "Builder"
-OWNER_ROLE        = "👑 Owner"
-
-SELLER_ROLES = [BASE_BUYING_ROLE, BEDROCK_ROLE, SPAWNER_ROLE, BUILDING_ROLE]
-
-# Channel names (Needed for Cogs)
-LOG_CHANNEL = "mod-logs"
-
-# Ticket channel prefixes
+# Ticket channel prefixes — a naming convention, not a per-guild setting.
 TICKET_PREFIXES = ("ticket-", "claimed-", "claim-")
-
-# Giveaway settings fallback
-GIVEAWAYS_FILE = "giveaways.json"
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +96,11 @@ def get_guild_config(db, guild_id: int) -> dict:
         "TRANSCRIPT_CHANNEL_ID": transcript_id,
         "BUILDER_ORDERS_CHANNEL_ID": builder_orders_id,
         "VOUCH_CHANNEL_ID": vouch_channel_id,
+        # Ticket category IDs — configured on the dashboard instead of being
+        # matched by hardcoded category names.
+        "BUILDING_CATEGORY_ID": _parse_id(config.get("BUILDING_CATEGORY_ID")),
+        "APPLICATION_CATEGORY_ID": _parse_id(config.get("APPLICATION_CATEGORY_ID")),
+        "CLAIM_CATEGORY_ID": _parse_id(config.get("CLAIM_CATEGORY_ID")),
     }
 
 
@@ -210,3 +201,5 @@ def staff_only():
         if is_staff_user(interaction): return True
         raise app_commands.CheckFailure("❌ Staff only!")
     return app_commands.check(predicate)
+
+

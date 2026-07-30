@@ -12,7 +12,122 @@ from flask import abort
 from datetime import datetime, timedelta
 import logging
 
+def _parse_spawner_price(price_str) -> float:
+    """Convert '5.5m' / '500k' / '10000' style strings to a raw float. Mirrors
+    cogs/building.py's parse_price so dashboard input matches in-ticket math."""
+    if price_str is None:
+        return 0.0
+    s = str(price_str).strip().lower().replace(",", "")
+    try:
+        if s.endswith("k"):
+            return float(s[:-1]) * 1_000
+        elif s.endswith("m"):
+            return float(s[:-1]) * 1_000_000
+        elif s.endswith("b"):
+            return float(s[:-1]) * 1_000_000_000
+        return float(s) if s else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _format_spawner_price(value) -> str:
+    """Reverse of _parse_spawner_price, for embed display (e.g. 5500000 -> '5.5m')."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "0"
+    for suffix, divisor in (("b", 1_000_000_000), ("m", 1_000_000), ("k", 1_000)):
+        if abs(value) >= divisor:
+            n = value / divisor
+            text = f"{n:.2f}".rstrip("0").rstrip(".")
+            return f"{text}{suffix}"
+    return f"{value:.0f}"
+
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Staff Points: shared helpers for the "Staff Points" settings tab + the
+# full leaderboard page. Mirrors the scoring logic in cogs/staff_points.py
+# so the dashboard always shows the exact numbers the bot is using.
+# ---------------------------------------------------------------------------
+
+STAFF_POINTS_DEFAULTS = {
+    "PTS_MSG_OUTSIDE":   0.05,
+    "PTS_MSG_TICKET":    0.25,
+    "PTS_TICKET_RENAME": 20,
+    "PTS_TICKET_CLOSE":  15,
+    "PTS_MOD_ACTION":    30,
+}
+
+# event type -> dashboard config field name
+_STAFF_POINTS_FIELD_FOR_TYPE = {
+    "msg_outside":   "PTS_MSG_OUTSIDE",
+    "msg_ticket":    "PTS_MSG_TICKET",
+    "ticket_rename": "PTS_TICKET_RENAME",
+    "ticket_close":  "PTS_TICKET_CLOSE",
+    "mod_action":    "PTS_MOD_ACTION",
+}
+
+_STAFF_POINTS_WINDOWS = ("all", "24h", "7d", "30d")
+
+
+def _staff_points_weights(guild_id):
+    cfg = db["staff_points_config"].find_one({"guild_id": guild_id}) or {} if db is not None else {}
+    weights = {}
+    for field, default in STAFF_POINTS_DEFAULTS.items():
+        raw = cfg.get(field)
+        try:
+            weights[field] = float(raw) if raw not in (None, "") else default
+        except (TypeError, ValueError):
+            weights[field] = default
+    return weights
+
+
+def _staff_points_empty_bucket():
+    return {"mod_action": 0, "ticket_close": 0, "ticket_rename": 0,
+            "msg_ticket": 0, "msg_outside": 0, "points": 0.0}
+
+
+def _staff_points_aggregate(guild_id, cutoff):
+    query = {"guild_id": guild_id}
+    if cutoff is not None:
+        query["ts"] = {"$gte": cutoff}
+    out = {}
+    for doc in db["staff_points_log"].find(query):
+        uid = doc["user_id"]
+        entry = out.setdefault(uid, _staff_points_empty_bucket())
+        etype = doc.get("type")
+        if etype in entry:
+            entry[etype] += 1
+        entry["points"] += doc.get("points", 0)
+    return out
+
+
+def _staff_points_ranking(guild_id):
+    """[(user_id, {'all': bucket, '24h': bucket, '7d': bucket, '30d': bucket}), ...]
+    sorted by all-time points, descending."""
+    now = datetime.utcnow()
+    cutoffs = {
+        "all": None,
+        "24h": now - timedelta(hours=24),
+        "7d":  now - timedelta(days=7),
+        "30d": now - timedelta(days=30),
+    }
+    per_window = {key: _staff_points_aggregate(guild_id, cutoff) for key, cutoff in cutoffs.items()}
+    merged = {}
+    for uid in per_window["all"]:
+        merged[uid] = {w: per_window[w].get(uid, _staff_points_empty_bucket()) for w in _STAFF_POINTS_WINDOWS}
+    return sorted(merged.items(), key=lambda kv: kv[1]["all"]["points"], reverse=True)
+
+
+def _staff_points_fmt(windows, key, is_points=False):
+    vals = []
+    for w in _STAFF_POINTS_WINDOWS:
+        v = round(windows[w]["points"], 2) if is_points else windows[w][key]
+        vals.append(str(v))
+    return " • ".join(vals)
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -406,6 +521,9 @@ def guild_dashboard(guild_id):
             transcript_channel_id = request.form.get("TRANSCRIPT_CHANNEL_ID")
             builder_orders_channel_id = request.form.get("BUILDER_ORDERS_CHANNEL_ID")
             vouch_channel_id = request.form.get("VOUCH_CHANNEL_ID")
+            building_category_id = request.form.get("BUILDING_CATEGORY_ID")
+            application_category_id = request.form.get("APPLICATION_CATEGORY_ID")
+            claim_category_id = request.form.get("CLAIM_CATEGORY_ID")
 
             db["bot_config"].update_one(
                 {"guild_id": guild_id},
@@ -416,6 +534,9 @@ def guild_dashboard(guild_id):
                         "ADMIN_ROLE": int(admin_role) if admin_role and admin_role != "none" else None,
                         "TRUSTED_STAFF_ROLE": int(trusted_staff_role) if trusted_staff_role and trusted_staff_role != "none" else None,
                         "LOG_CHANNEL_ID": int(log_channel_id) if log_channel_id and log_channel_id != "none" else None,
+                        "BUILDING_CATEGORY_ID": int(building_category_id) if building_category_id and building_category_id != "none" else None,
+                        "APPLICATION_CATEGORY_ID": int(application_category_id) if application_category_id and application_category_id != "none" else None,
+                        "CLAIM_CATEGORY_ID": int(claim_category_id) if claim_category_id and claim_category_id != "none" else None,
                         "TRANSCRIPT_CHANNEL_ID": int(transcript_channel_id)
                         if transcript_channel_id and transcript_channel_id != "none"
                         else None,
@@ -562,6 +683,160 @@ def guild_dashboard(guild_id):
                     {"$pull": {"builds": {"id": build_id}}}
                 )
 
+        elif form_type == "spawner_config":
+            panel_channel_id = request.form.get("SPAWNER_PANEL_CHANNEL_ID")
+            category_id = request.form.get("SPAWNER_CATEGORY_ID")
+            buy_role_ids = request.form.getlist("SPAWNER_BUY_PING_ROLE_IDS")
+            sell_role_ids = request.form.getlist("SPAWNER_SELL_PING_ROLE_IDS")
+
+            db["spawner_config"].update_one(
+                {"guild_id": guild_id},
+                {"$set": {
+                    "PANEL_CHANNEL_ID": int(panel_channel_id) if panel_channel_id and panel_channel_id != "none" else None,
+                    "CATEGORY_ID": int(category_id) if category_id and category_id != "none" else None,
+                    "BUY_PING_ROLE_IDS": [int(r) for r in buy_role_ids if r],
+                    "SELL_PING_ROLE_IDS": [int(r) for r in sell_role_ids if r],
+                }},
+                upsert=True
+            )
+
+        elif form_type == "add_spawner_type":
+            name = request.form.get("spawner_name", "").strip()
+            emoji = request.form.get("spawner_emoji", "").strip()
+            buy_price = _parse_spawner_price(request.form.get("spawner_buy_price"))
+            sell_price = _parse_spawner_price(request.form.get("spawner_sell_price"))
+
+            if name:
+                spawner_id = name.lower().replace(" ", "_")
+                new_type = {
+                    "id": spawner_id,
+                    "name": name,
+                    "emoji": emoji,
+                    "buy_price": buy_price,
+                    "sell_price": sell_price,
+                }
+                panel_doc = db["spawner_panels"].find_one({"guild_id": guild_id})
+                if panel_doc:
+                    if not any(t["id"] == spawner_id for t in panel_doc.get("types", [])):
+                        db["spawner_panels"].update_one(
+                            {"guild_id": guild_id},
+                            {"$push": {"types": new_type}}
+                        )
+                else:
+                    db["spawner_panels"].insert_one({"guild_id": guild_id, "types": [new_type]})
+
+        elif form_type == "update_spawner_type":
+            spawner_id = request.form.get("edit_spawner_id")
+            name = request.form.get("spawner_name", "").strip()
+            emoji = request.form.get("spawner_emoji", "").strip()
+            buy_price = _parse_spawner_price(request.form.get("spawner_buy_price"))
+            sell_price = _parse_spawner_price(request.form.get("spawner_sell_price"))
+
+            if spawner_id and name:
+                db["spawner_panels"].update_one(
+                    {"guild_id": guild_id, "types.id": spawner_id},
+                    {"$set": {
+                        "types.$.name": name,
+                        "types.$.emoji": emoji,
+                        "types.$.buy_price": buy_price,
+                        "types.$.sell_price": sell_price,
+                    }}
+                )
+
+        elif form_type == "delete_spawner_type":
+            spawner_id = request.form.get("delete_spawner_id")
+            if spawner_id:
+                db["spawner_panels"].update_one(
+                    {"guild_id": guild_id},
+                    {"$pull": {"types": {"id": spawner_id}}}
+                )
+
+        elif form_type == "send_spawner_panel":
+            panel_channel_id = request.form.get("spawner_send_channel_id")
+            types = (db["spawner_panels"].find_one({"guild_id": guild_id}) or {}).get("types", [])
+
+            if panel_channel_id and types:
+                buying = "\n".join(
+                    f"{t.get('emoji', '📦')} {t['name']} **{_format_spawner_price(t.get('buy_price', 0))}** each"
+                    for t in types
+                ) or "—"
+                selling = "\n".join(
+                    f"{t.get('emoji', '📦')} {t['name']} **{_format_spawner_price(t.get('sell_price', 0))}** each"
+                    for t in types
+                ) or "—"
+
+                embed_payload = {
+                    "title": "Spawner Prices 🛒",
+                    "color": 0x2b2d31,
+                    "fields": [
+                        {"name": "Buying:", "value": buying, "inline": False},
+                        {"name": "Selling:", "value": selling, "inline": False},
+                        {"name": "Notes", "value": "Open a ticket below to buy or sell spawners.", "inline": False},
+                    ],
+                }
+                component = {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 2,
+                            "label": "Buy Spawners",
+                            "style": 4,
+                            "custom_id": "spawner_buy_btn",
+                            "emoji": {"name": "⬇️"},
+                        },
+                        {
+                            "type": 2,
+                            "label": "Sell Spawners",
+                            "style": 3,
+                            "custom_id": "spawner_sell_btn",
+                            "emoji": {"name": "⬆️"},
+                        },
+                    ],
+                }
+                requests.post(
+                    f"https://discord.com/api/v10/channels/{panel_channel_id}/messages",
+                    headers={"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"},
+                    json={"embeds": [embed_payload], "components": [component]},
+                )
+                db["spawner_config"].update_one(
+                    {"guild_id": guild_id},
+                    {"$set": {"PANEL_CHANNEL_ID": int(panel_channel_id)}},
+                    upsert=True
+                )
+
+        elif form_type == "staff_activity_config":
+            role_id = request.form.get("STAFF_ACTIVITY_ROLE_ID")
+            channel_id = request.form.get("STAFF_ACTIVITY_CHANNEL_ID")
+            interval_days = request.form.get("STAFF_ACTIVITY_INTERVAL_DAYS")
+            window_hours = request.form.get("STAFF_ACTIVITY_WINDOW_HOURS")
+            emoji = request.form.get("STAFF_ACTIVITY_EMOJI", "").strip() or "💎"
+            enabled = bool(request.form.get("staff_activity_enabled"))
+
+            db["staff_activity_config"].update_one(
+                {"guild_id": guild_id},
+                {"$set": {
+                    "ENABLED": enabled,
+                    "CHECK_ROLE_ID": int(role_id) if role_id and role_id != "none" else None,
+                    "CHANNEL_ID": int(channel_id) if channel_id and channel_id != "none" else None,
+                    "INTERVAL_DAYS": int(interval_days) if interval_days else 2,
+                    "WINDOW_HOURS": int(window_hours) if window_hours else 24,
+                    "EMOJI": emoji,
+                }},
+                upsert=True
+            )
+
+        elif form_type == "staff_points_config":
+            updates = {}
+            for field, default in STAFF_POINTS_DEFAULTS.items():
+                raw = request.form.get(field)
+                try:
+                    updates[field] = float(raw) if raw not in (None, "") else default
+                except ValueError:
+                    updates[field] = default
+            db["staff_points_config"].update_one(
+                {"guild_id": guild_id}, {"$set": updates}, upsert=True
+            )
+
         elif form_type == "promotion_config":
             announce_channel_id = request.form.get("PROMOTE_ANNOUNCE_CHANNEL_ID")
 
@@ -599,6 +874,7 @@ def guild_dashboard(guild_id):
         logger.error(f"❌ CHANNELS FETCH FAILED: {chans_res.status_code} - {chans_res.text}")
     channels = chans_res.json() if chans_res.status_code == 200 else []
     text_channels = [c for c in channels if c["type"] == 0]
+    category_channels = [c for c in channels if c["type"] == 4]
 
     # Fetch Settings
     settings = {
@@ -616,6 +892,9 @@ def guild_dashboard(guild_id):
                 "TRANSCRIPT_CHANNEL_ID": cfg.get("TRANSCRIPT_CHANNEL_ID"),
                 "BUILDER_ORDERS_CHANNEL_ID": cfg.get("BUILDER_ORDERS_CHANNEL_ID"),
                 "VOUCH_CHANNEL_ID": cfg.get("VOUCH_CHANNEL_ID"),
+                "BUILDING_CATEGORY_ID": cfg.get("BUILDING_CATEGORY_ID"),
+                "APPLICATION_CATEGORY_ID": cfg.get("APPLICATION_CATEGORY_ID"),
+                "CLAIM_CATEGORY_ID": cfg.get("CLAIM_CATEGORY_ID"),
             }
         )(db["bot_config"].find_one({"guild_id": guild_id}) or {}),
         "applications": list(db["applications_config"].find({"guild_id": guild_id})),
@@ -625,6 +904,12 @@ def guild_dashboard(guild_id):
             # The config includes PAYMENT_LOG_CHANNEL_ID
             "builds": (db["building_panels"].find_one({"guild_id": guild_id}) or {}).get("builds", [])
         },
+        "spawners": {
+            "config": db["spawner_config"].find_one({"guild_id": guild_id}) or {},
+            "types": (db["spawner_panels"].find_one({"guild_id": guild_id}) or {}).get("types", [])
+        },
+        "staff_activity": db["staff_activity_config"].find_one({"guild_id": guild_id}) or {},
+        "staff_points_weights": _staff_points_weights(guild_id),
     }
 
     guild_name = "Unknown Server"
@@ -634,7 +919,7 @@ def guild_dashboard(guild_id):
             break
 
     return render_template(
-        "settings.html", guild_id=guild_id, guild_name=guild_name, roles=roles, channels=text_channels, settings=settings
+        "settings.html", guild_id=guild_id, guild_name=guild_name, roles=roles, channels=text_channels, categories=category_channels, settings=settings
     )
 
 
@@ -1317,6 +1602,59 @@ def tickets_dashboard(guild_id):
         panels=panels,
     )
 
+
+@app.route("/dashboard/<int:guild_id>/staffpoints")
+def staff_points_dashboard(guild_id):
+    """Full staff points leaderboard — every staff member, every category,
+    every time window, on one page."""
+    if "access_token" not in session:
+        return redirect("/")
+    user_guild_ids = [int(g["id"]) for g in session.get("guilds", [])]
+    if guild_id not in user_guild_ids:
+        abort(403)
+    if not bot_in_guild(guild_id):
+        return redirect(f"/dashboard?bot_missing={guild_id}")
+    if db is None:
+        return "<h1>Database unavailable</h1>", 500
+
+    weights = _staff_points_weights(guild_id)
+    ranking = _staff_points_ranking(guild_id)
+
+    # Resolve display names in one call rather than one request per member.
+    bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
+    members_res = requests.get(
+        f"https://discord.com/api/v10/guilds/{guild_id}/members?limit=1000", headers=bot_headers
+    )
+    members = members_res.json() if members_res.status_code == 200 else []
+    member_names = {
+        int(m["user"]["id"]): (m.get("nick") or m["user"]["username"])
+        for m in members if "user" in m
+    }
+
+    rows = []
+    for rank, (uid, windows) in enumerate(ranking, start=1):
+        rows.append({
+            "rank":          rank,
+            "user_id":       uid,
+            "name":          member_names.get(uid, f"Unknown ({uid})"),
+            "points":        _staff_points_fmt(windows, None, is_points=True),
+            "mod_action":    _staff_points_fmt(windows, "mod_action"),
+            "ticket_close":  _staff_points_fmt(windows, "ticket_close"),
+            "ticket_rename": _staff_points_fmt(windows, "ticket_rename"),
+            "msg_ticket":    _staff_points_fmt(windows, "msg_ticket"),
+            "msg_outside":   _staff_points_fmt(windows, "msg_outside"),
+        })
+
+    guild_name = next((g["name"] for g in session.get("guilds", []) if int(g["id"]) == guild_id), "Server")
+
+    return render_template(
+        "staff_points_dashboard.html",
+        guild_id=guild_id,
+        guild_name=guild_name,
+        weights=weights,
+        rows=rows,
+    )
+
 # ── Bot Console: run bot actions on-demand from the dashboard ───────────────
 
 def _discord_api(method, path, reason=None, **kwargs):
@@ -1992,3 +2330,5 @@ def mc_disable_schedule(discord_id):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+
+

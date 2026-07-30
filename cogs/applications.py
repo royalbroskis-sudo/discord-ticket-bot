@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from datetime import datetime, timezone
 from cogs.config import get_guild_config
+from cogs.tickets import record_open_ticket
 
 # ---------------------------------------------------------------------------
 # Application Views
@@ -155,12 +156,13 @@ class ApplicationActionView(discord.ui.View):
         applicant = guild.get_member(self.applicant_id) or await guild.fetch_member(self.applicant_id)
         uname = applicant.name.lower()
 
-        cat = discord.utils.get(guild.categories, name="Application Tickets")
+        cfg = get_guild_config(interaction.client.db, guild.id)
+        cat = guild.get_channel(cfg.get("APPLICATION_CATEGORY_ID")) if cfg.get("APPLICATION_CATEGORY_ID") else None
         if not cat:
             cat = await guild.create_category("Application Tickets")
             await cat.set_permissions(guild.default_role, read_messages=False)
 
-        trusted_role_id = get_guild_config(interaction.client.db, guild.id)["TRUSTED_STAFF_ROLE_ID"]
+        trusted_role_id = cfg["TRUSTED_STAFF_ROLE_ID"]
         trusted_role = guild.get_role(trusted_role_id) if trusted_role_id else None
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -181,6 +183,11 @@ class ApplicationActionView(discord.ui.View):
 
         view = TicketView()
         await channel.send(embed=embed, view=view)
+
+        record_open_ticket(
+            interaction.client.db, guild.id, channel.id, applicant.id, applicant.name,
+            "Application", source="application",
+        )
 
         button = discord.utils.get(self.children, custom_id=f"app_ticket_{self.app_id}_{self.applicant_id}")
         if button:
@@ -313,3 +320,5 @@ class Applications(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Applications(bot))
+
+

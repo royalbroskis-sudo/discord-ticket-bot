@@ -44,6 +44,44 @@ def get_panel(db, panel_id: str) -> dict | None:
 def get_panels(db, guild_id: int) -> list[dict]:
     return list(db["ticket_panels"].find({"guild_id": guild_id}))
 
+def record_open_ticket(db, guild_id: int, channel_id: int, creator_id: int,
+                        creator_name: str, category: str, source: str = "dynamic", **extra):
+    """Upsert an 'open_tickets' record the moment any ticket channel is
+    created (regular panel tickets, spawner tickets, application tickets,
+    build tickets, giveaway claim tickets, or /mark). This is the single
+    source of truth _close_ticket() uses to find the real creator_id for the
+    closing DM — the old approach of guessing the creator from the channel
+    topic / scanning message history silently failed whenever the creator
+    hadn't actually typed a message in the channel. It also means every open
+    ticket survives a bot restart since it lives in Mongo, not memory."""
+    if db is None:
+        return
+    doc = {
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "creator_id": creator_id,
+        "creator_name": creator_name,
+        "category": category,
+        "source": source,
+        "status": "open",
+        "opened_at": datetime.now(timezone.utc),
+    }
+    doc.update(extra)
+    db["open_tickets"].update_one({"channel_id": channel_id}, {"$set": doc}, upsert=True)
+
+def get_open_ticket(db, channel_id: int) -> dict | None:
+    if db is None:
+        return None
+    return db["open_tickets"].find_one({"channel_id": channel_id})
+
+def mark_ticket_closed(db, channel_id: int):
+    if db is None:
+        return
+    db["open_tickets"].update_one(
+        {"channel_id": channel_id},
+        {"$set": {"status": "closed", "closed_at": datetime.now(timezone.utc)}},
+    )
+
 # ── Channel helpers ───────────────────────────────────────────────────────────
 
 def get_creator_name(channel: discord.TextChannel) -> str:
@@ -143,6 +181,8 @@ async def create_ticket_channel(
 
     view = TicketView()
     await channel.send(embed=embed, view=view)
+
+    record_open_ticket(db, guild.id, channel.id, interaction.user.id, interaction.user.name, name, source="panel")
 
     # Ping role
     if ping_role_name:
@@ -281,11 +321,11 @@ class TicketView(discord.ui.View):
         await interaction.response.send_message(
             "🔒 Closing ticket and generating transcript...", ephemeral=True
         )
-        await _close_ticket(interaction.channel, interaction.user, interaction.client.db)
+        await _close_ticket(interaction.channel, interaction.user, interaction.client.db, bot=interaction.client)
 
 # ── Transcript & Close ────────────────────────────────────────────────────────
 
-async def _close_ticket(channel: discord.TextChannel, closed_by: discord.Member, db):
+async def _close_ticket(channel: discord.TextChannel, closed_by: discord.Member, db, bot=None):
     guild = channel.guild
 
     messages = []
@@ -305,26 +345,64 @@ async def _close_ticket(channel: discord.TextChannel, closed_by: discord.Member,
     except Exception as e:
         print(f"[tickets] Error fetching messages: {e}")
 
+    open_doc = get_open_ticket(db, channel.id)
+
     creator_name = "Unknown"
     category     = "Unknown"
-    if channel.topic:
+    creator_id   = None
+
+    if open_doc:
+        creator_id   = open_doc.get("creator_id")
+        creator_name = open_doc.get("creator_name", creator_name)
+        category     = open_doc.get("category", category)
+
+    # Fallback for tickets opened before open_tickets existed, or if the
+    # record is somehow missing — parse it out of the channel topic like before.
+    if channel.topic and (creator_name == "Unknown" or category == "Unknown"):
         if "Ticket by " in channel.topic:
-            creator_name = channel.topic.split("Ticket by ")[1].split(" |")[0].strip()
-            if "|" in channel.topic:
+            if creator_name == "Unknown":
+                creator_name = channel.topic.split("Ticket by ")[1].split(" |")[0].strip()
+            if category == "Unknown" and "|" in channel.topic:
                 category = channel.topic.split("|")[1].strip()
         elif "Buyer: " in channel.topic:
-            creator_name = channel.topic.split("Buyer: ")[1].split(" |")[0].strip()
-            if "Build: " in channel.topic:
+            if creator_name == "Unknown":
+                creator_name = channel.topic.split("Buyer: ")[1].split(" |")[0].strip()
+            if category == "Unknown" and "Build: " in channel.topic:
                 category = "Build: " + channel.topic.split("Build: ")[1].split(" |")[0].strip()
 
+    # Resolve the actual member/user object for the closing DM. Prefer the
+    # stored creator_id (reliable, works even if they never sent a message
+    # in the channel or already left the guild); only fall back to guessing
+    # from message history for pre-existing tickets with no open_tickets record.
     creator_member = None
-    for m in messages:
-        if not m["is_bot"] and str(m["author"]).lower().startswith(creator_name.lower()):
-            creator_member = guild.get_member(m["author_id"])
-            if creator_member:
-                break
+    if creator_id:
+        creator_member = guild.get_member(creator_id)
+        if not creator_member:
+            try:
+                creator_member = await guild.fetch_member(creator_id)
+            except discord.HTTPException:
+                if bot is not None:
+                    try:
+                        creator_member = await bot.fetch_user(creator_id)
+                    except discord.HTTPException:
+                        creator_member = None
+    if not creator_member:
+        for m in messages:
+            if not m["is_bot"] and str(m["author"]).lower().startswith(creator_name.lower()):
+                creator_member = guild.get_member(m["author_id"])
+                if creator_member:
+                    break
 
     html_content = _generate_html(channel, messages, closed_by, creator_name, category)
+    mark_ticket_closed(db, channel.id)
+
+    # Credit the closer with a staff point event. Imported lazily to avoid a
+    # circular import (cogs.staff_points imports helpers from this module).
+    try:
+        from cogs.staff_points import log_event
+        log_event(db, guild.id, closed_by.id, "ticket_close")
+    except Exception as e:
+        print(f"[tickets] Failed to log staff point event: {e}")
 
     transcript_doc = {
         "_id":          ObjectId(),
@@ -540,6 +618,40 @@ class Tickets(commands.Cog):
             for p in panels if current.lower() in p["name"].lower()
         ][:25]
 
+    # /mark — retroactively mark an existing channel as a ticket
+    @app_commands.command(name="mark", description="Mark this channel as a ticket so ticket commands (close, etc.) work here")
+    @app_commands.describe(category="Category/type label for this ticket (e.g. Spawners, Build, Support)",
+                            opened_by="The member this ticket was opened for")
+    @admin_only()
+    async def mark(self, interaction: discord.Interaction, category: str, opened_by: discord.Member):
+        channel = interaction.channel
+        new_topic = f"Ticket by {opened_by.name} | {category}"
+
+        try:
+            await channel.edit(topic=new_topic)
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "❌ I don't have permission to edit this channel's topic.", ephemeral=True
+            )
+
+        db = interaction.client.db
+        record_open_ticket(
+            db, interaction.guild.id, channel.id, opened_by.id, opened_by.name, category,
+            source="marked", marked_by_id=interaction.user.id,
+        )
+
+        # Drop in the same close/request-close controls a normal ticket gets.
+        try:
+            await channel.send("**Staff Controls**", view=TicketView())
+        except discord.HTTPException:
+            pass
+
+        await interaction.response.send_message(
+            f"✅ Marked {channel.mention} as a **{category}** ticket for {opened_by.mention}.\n"
+            f"`/close` and the ticket buttons will now work in this channel.",
+            ephemeral=True,
+        )
+
     # /close — close current ticket
     @app_commands.command(name="close", description="Close the current ticket")
     async def close(self, interaction: discord.Interaction):
@@ -568,7 +680,7 @@ class Tickets(commands.Cog):
         await interaction.response.send_message(
             "🔒 Closing ticket and generating transcript...", ephemeral=True
         )
-        await _close_ticket(interaction.channel, interaction.user, interaction.client.db)
+        await _close_ticket(interaction.channel, interaction.user, interaction.client.db, bot=interaction.client)
 
 
 async def setup(bot: commands.Bot):

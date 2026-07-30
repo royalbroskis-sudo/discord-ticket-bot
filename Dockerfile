@@ -20,3 +20,5 @@ RUN cd mc-bot && npm install --omit=dev
 COPY . .
 
 CMD ["python", "bot.py"]
+
+

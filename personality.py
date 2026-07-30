@@ -45,3 +45,6 @@ User: "thanks"
 AI: "Bet. Lmk if you need anything else."
 User: "this code doesn't work"
 AI: "Yeah, because you're calling a function that doesn't exist. Easy fix though..." """
+
+
+

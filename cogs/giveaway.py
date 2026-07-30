@@ -8,7 +8,7 @@ import string
 from typing import Optional, List
 from bson import ObjectId
 from cogs.config import admin_only, is_admin_user, is_staff_user, get_guild_config, get_configured_role, TICKET_PREFIXES
-from cogs.tickets import TicketView
+from cogs.tickets import TicketView, record_open_ticket
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +599,8 @@ class WinnerClaimView(discord.ui.View):
             # Stored channel no longer exists (deleted/closed) — fall through and
             # let them open a fresh one; the stale ID gets overwritten below.
 
-        claim_category = discord.utils.get(guild.categories, name="Claim Tickets")
+        cfg = get_guild_config(interaction.client.db, guild.id)
+        claim_category = guild.get_channel(cfg.get("CLAIM_CATEGORY_ID")) if cfg.get("CLAIM_CATEGORY_ID") else None
         if not claim_category:
             claim_category = await guild.create_category("Claim Tickets")
             await claim_category.set_permissions(guild.default_role, read_messages=False)
@@ -614,7 +615,6 @@ class WinnerClaimView(discord.ui.View):
             ),
         }
 
-        cfg = get_guild_config(interaction.client.db, guild.id)
         staff_role = get_configured_role(guild, cfg, "STAFF_ROLE_ID")
         if staff_role:
             overwrites[staff_role] = discord.PermissionOverwrite(
@@ -627,6 +627,11 @@ class WinnerClaimView(discord.ui.View):
             category=claim_category,
             overwrites=overwrites,
             topic=f"Ticket by {interaction.user.name} | Prize Claim",
+        )
+
+        record_open_ticket(
+            interaction.client.db, guild.id, ticket.id, interaction.user.id,
+            interaction.user.name, "Prize Claim", source="giveaway",
         )
 
         giveaway_link = (
@@ -1257,3 +1262,5 @@ class Giveaways(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Giveaways(bot))
+
+

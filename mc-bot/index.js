@@ -698,3 +698,5 @@ connectMongo().then(async () => {
   console.error('[MC-BOT] ❌ MongoDB connection failed:', err)
   process.exit(1)
 })
+
+

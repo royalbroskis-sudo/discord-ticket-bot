@@ -4,6 +4,8 @@ from discord import app_commands
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from cogs.config import mod_only, get_guild_config
+from cogs.staff_points import log_event
+from cogs.tickets import has_ticket_topic, is_ticket_channel
 # ---------------------------------------------------------------------------
 # Persistence for Warnings (MongoDB)
 # ---------------------------------------------------------------------------
@@ -135,6 +137,7 @@ class Moderation(commands.Cog):
                            extra=f"Duration: {duration} minute(s)")
         await interaction.response.send_message(embed=embed)
         await _log(interaction, embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
         try:
             await member.send(
@@ -170,6 +173,7 @@ class Moderation(commands.Cog):
         embed = _mod_embed("Unmute", member, interaction.user, reason, 0x2ecc71)
         await interaction.response.send_message(embed=embed)
         await _log(interaction, embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
         try:
             await member.send(f"🔊 Your mute in **{interaction.guild.name}** has been removed.\nReason: {reason}")
@@ -207,6 +211,7 @@ class Moderation(commands.Cog):
         embed = _mod_embed("Kick", member, interaction.user, reason, 0xe67e22)
         await interaction.response.send_message(embed=embed)
         await _log(interaction, embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
     # ------------------------------------------------------------------
     # /ban
@@ -247,6 +252,7 @@ class Moderation(commands.Cog):
                            extra=f"Messages deleted: {delete_days} day(s)")
         await interaction.response.send_message(embed=embed)
         await _log(interaction, embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
     # ------------------------------------------------------------------
     # /unban
@@ -282,6 +288,7 @@ class Moderation(commands.Cog):
         embed = _mod_embed("Unban", ban_entry.user, interaction.user, reason, 0x2ecc71)
         await interaction.response.send_message(embed=embed)
         await _log(interaction, embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
     # ------------------------------------------------------------------
     # /warn  (SAVES TO MONGODB)
@@ -310,6 +317,7 @@ class Moderation(commands.Cog):
                            extra=f"Total warnings: **{count}**")
         await interaction.response.send_message(embed=embed)
         await _log(interaction, embed)
+        log_event(self.bot.db, interaction.guild.id, interaction.user.id, "mod_action")
 
         try:
             await member.send(
@@ -516,9 +524,12 @@ class Moderation(commands.Cog):
     @mod_only()
     async def rename(self, interaction: discord.Interaction, new_name: str):
         clean = new_name.lower().replace(" ", "-")[:50]
+        was_ticket = has_ticket_topic(interaction.channel) or is_ticket_channel(interaction.channel)
         try:
             await interaction.channel.edit(name=clean)
             await interaction.response.send_message(f"✅ Channel renamed to `{clean}`.")
+            if was_ticket:
+                log_event(self.bot.db, interaction.guild.id, interaction.user.id, "ticket_rename")
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to rename this channel.", ephemeral=True)
         except discord.HTTPException as e:
@@ -555,3 +566,5 @@ class Moderation(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Moderation(bot))
+
+

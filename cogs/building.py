@@ -6,7 +6,7 @@ from discord import app_commands
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from cogs.config import admin_only, get_guild_config
-from cogs.tickets import TicketView, _close_ticket
+from cogs.tickets import TicketView, _close_ticket, record_open_ticket
 import asyncio
 import aiohttp
 import os
@@ -291,7 +291,7 @@ async def monitor_payment(order_id: str, db, guild_id: int, buyer_ign: str, rece
                 logger.error(f"monitor_payment: failed to send expiry embed: {e}")
             await asyncio.sleep(5)
             try:
-                await _close_ticket(channel, bot.user, db)
+                await _close_ticket(channel, bot.user, db, bot=bot)
             except Exception as e:
                 logger.error(f"monitor_payment: failed to close ticket on expiry: {e}")
     else:
@@ -328,14 +328,12 @@ async def create_build_ticket_from_modal(bot, guild, buyer, build, modal_data, r
     confirmation_role_id = cfg.get("BUILD_TICKET_PING_ROLE_ID")
     confirmation_role = guild.get_role(confirmation_role_id) if confirmation_role_id else None
     if not confirmation_role:
-        confirmation_role = discord.utils.get(guild.roles, name="295")
-    if not confirmation_role:
-        logger.error(f"Confirmation role (295) not found for guild {guild.id}")
+        logger.error(f"Build Ticket Ping role not configured on the dashboard for guild {guild.id}")
         return
 
     builder_role = guild.get_role(cfg.get("BUILDER_ROLE_ID")) if cfg.get("BUILDER_ROLE_ID") else None
 
-    cat = discord.utils.get(guild.categories, name="Building")
+    cat = guild.get_channel(cfg.get("BUILDING_CATEGORY_ID")) if cfg.get("BUILDING_CATEGORY_ID") else None
     if not cat:
         cat = await guild.create_category("Building")
         await cat.set_permissions(guild.default_role, read_messages=False)
@@ -354,6 +352,8 @@ async def create_build_ticket_from_modal(bot, guild, buyer, build, modal_data, r
         overwrites=overwrites,
         topic=f"Build: {build['name']} | Buyer: {buyer.name} | IGN: {modal_data['ign']} | Region: {modal_data['region']} | Farm: {modal_data['farm_name']}"
     )
+
+    record_open_ticket(db, guild.id, channel.id, buyer.id, buyer.name, f"Build: {build['name']}", source="build")
 
     # Update the order document with ticket channel info and new status
     db["building_orders"].update_one(
@@ -419,14 +419,12 @@ async def create_custom_build_ticket(bot, guild, buyer, build, modal_data):
     confirmation_role_id = cfg.get("BUILD_TICKET_PING_ROLE_ID")
     confirmation_role = guild.get_role(confirmation_role_id) if confirmation_role_id else None
     if not confirmation_role:
-        confirmation_role = discord.utils.get(guild.roles, name="295")
-    if not confirmation_role:
-        logger.error(f"create_custom_build_ticket: Confirmation role not found for guild {guild.id}")
+        logger.error(f"create_custom_build_ticket: Build Ticket Ping role not configured on the dashboard for guild {guild.id}")
         return
 
     builder_role = guild.get_role(cfg.get("BUILDER_ROLE_ID")) if cfg.get("BUILDER_ROLE_ID") else None
 
-    cat = discord.utils.get(guild.categories, name="Building")
+    cat = guild.get_channel(cfg.get("BUILDING_CATEGORY_ID")) if cfg.get("BUILDING_CATEGORY_ID") else None
     if not cat:
         cat = await guild.create_category("Building")
         await cat.set_permissions(guild.default_role, read_messages=False)
@@ -452,6 +450,8 @@ async def create_custom_build_ticket(bot, guild, buyer, build, modal_data):
             f"Farm: {modal_data['farm_name']}"
         )
     )
+
+    record_open_ticket(db, guild.id, channel.id, buyer.id, buyer.name, f"Build: {build['name']} (Custom)", source="build")
 
     # Update the order document with the ticket channel and set status to unpaid
     db["building_orders"].update_one(
@@ -1160,7 +1160,7 @@ class Building(commands.Cog):
         await interaction.response.send_message(embed=embed)
         await asyncio.sleep(5)
         try:
-            await _close_ticket(interaction.channel, interaction.user, db)
+            await _close_ticket(interaction.channel, interaction.user, db, bot=interaction.client)
         except Exception as e:
             logger.error(f"build_complete: failed to close ticket via _close_ticket: {e}")
             try:
@@ -1184,7 +1184,7 @@ class Building(commands.Cog):
         await interaction.response.send_message("❌ Ticket cancelled. Generating transcript and closing in 3 seconds...")
         await asyncio.sleep(3)
         try:
-            await _close_ticket(interaction.channel, interaction.user, db)
+            await _close_ticket(interaction.channel, interaction.user, db, bot=interaction.client)
         except Exception as e:
             logger.error(f"build_cancel: failed to close ticket via _close_ticket: {e}")
             try:
@@ -1230,3 +1230,6 @@ class Building(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Building(bot))
+
+
+
