@@ -1,14 +1,17 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
 
 /* ═══════════════════════════════════════════════
-   TOKENS
+   TOKENS  (EmberAFK palette)
 ═══════════════════════════════════════════════ */
 :root {
-    --bg-base:      #0d0e10;
-    --bg-raised:    #141518;
-    --bg-overlay:   #1a1c20;
-    --bg-surface:   #1f2127;
-    --bg-muted:     #252830;
+    --font-body: 'DM Sans', 'Inter', system-ui, sans-serif;
+    --font-head: 'Manrope', 'Inter', system-ui, sans-serif;
+
+    --bg-base:      #080b12;
+    --bg-raised:    #0d1119;
+    --bg-overlay:   #131824;
+    --bg-surface:   #161c29;
+    --bg-muted:     #1d2434;
 
     --accent:       #5865F2;
     --accent-mid:   #6d78f5;
@@ -67,8 +70,12 @@
     padding: 0;
 }
 
+h1, h2, h3, h4, h5, h6, .brand, .section-title, .hero h1 {
+    font-family: var(--font-head);
+}
+
 body {
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: var(--font-body);
     background: var(--bg-base);
     color: var(--text-main);
     display: flex;
@@ -839,3 +846,44 @@ hr {
 }
 
 
+
+/* ═══════════════════════════════════════════════
+   PREMIUM / "COMING SOON" LOCKED CARDS
+═══════════════════════════════════════════════ */
+.plan-card { position: relative; }
+.plan-card.locked .plan-inner {
+    filter: blur(4px);
+    opacity: 0.55;
+    pointer-events: none;
+    user-select: none;
+}
+.plan-card.locked::after {
+    content: 'Coming Soon';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-head);
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-bright);
+    background: rgba(8,11,18,0.35);
+    border-radius: inherit;
+    z-index: 2;
+}
+.plan-badge-soon {
+    display: inline-block;
+    background: var(--warning-tint);
+    color: var(--warning);
+    border: 1px solid rgba(245,158,11,0.3);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 999px;
+    margin-bottom: 10px;
+}

@@ -1,10 +1,11 @@
 """
 cogs/staff_points.py — Staff activity / points leaderboard.
 
-Tracks staff point-earning actions and shows a ranked, arrow-navigable
-leaderboard (All Time / 24h / 7d / 30d), one staff member per page —
-same layout as the old points dashboard, minus stream meme approvals
-(not a feature this bot has).
+/staffstats posts a public leaderboard message in the channel it's run in
+(several staff members per page, arrow-paginated). Running it again deletes
+the old tracked message for that guild and posts a fresh one; a background
+task also edits the tracked message in place every hour so it stays current
+without needing anyone to re-run the command.
 
 Points are earned for:
     • Message sent outside a ticket              -> 0.05
@@ -12,11 +13,14 @@ Points are earned for:
     • Ticket renamed (via /rename in a ticket)     -> 20
     • Ticket closed                                -> 15
     • Moderation action (mute/kick/ban/warn/etc.)  -> 30
+(Weights are configurable per-guild on the dashboard — see get_weights().)
 
 Every event is stored as its own document in the "staff_points_log"
 collection ({guild_id, user_id, type, points, ts}), so totals for any
 time window are just a date-filtered sum — no separate counters to keep
-in sync, and a bot restart never loses history.
+in sync, and a bot restart never loses history. The currently-posted
+board message is tracked in "staff_points_board" ({guild_id, channel_id,
+message_id, page}).
 
 Other cogs report points by calling `log_event(db, guild_id, user_id, type)`.
 Tickets/moderation/staff_utils import this lazily (inside the function
@@ -25,12 +29,12 @@ cogs.tickets at load time.
 """
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
 from cogs.tickets import has_ticket_topic, is_ticket_channel
-from cogs.config import staff_only
+from cogs.config import staff_only, get_guild_config, member_has_role_id
 
 # ---------------------------------------------------------------------------
 # Scoring
@@ -137,9 +141,12 @@ def _aggregate(db, guild_id: int, cutoff: datetime | None) -> dict:
     return out
 
 
-def _build_ranking(db, guild_id: int) -> list[tuple[int, dict]]:
+def _build_ranking(db, guild: discord.Guild) -> list[tuple[int, dict]]:
     """Returns [(user_id, {'all': bucket, '24h': bucket, '7d': bucket, '30d': bucket}), ...]
-    sorted by all-time points, descending."""
+    sorted by all-time points, descending. Only includes members who
+    currently hold the Staff role configured on the dashboard — someone
+    who earned points and later lost/never had that role won't show up."""
+    guild_id = guild.id
     now = datetime.now(timezone.utc)
     cutoffs = {
         "all": None,
@@ -149,70 +156,128 @@ def _build_ranking(db, guild_id: int) -> list[tuple[int, dict]]:
     }
     per_window = {key: _aggregate(db, guild_id, cutoff) for key, cutoff in cutoffs.items()}
 
+    cfg = get_guild_config(db, guild_id)
+    staff_role_id = cfg.get("STAFF_ROLE_ID")
+
     merged: dict[int, dict] = {}
     for uid in per_window["all"]:
+        if staff_role_id:
+            member = guild.get_member(uid)
+            if not member or not member_has_role_id(member, staff_role_id):
+                continue
         merged[uid] = {w: per_window[w].get(uid, _empty_bucket()) for w in _WINDOW_KEYS}
 
     return sorted(merged.items(), key=lambda kv: kv[1]["all"]["points"], reverse=True)
 
 
 # ---------------------------------------------------------------------------
-# Leaderboard view (arrow pagination, one member per page)
+# Leaderboard board (public message, several members per page, persists
+# across restarts, auto-refreshes hourly)
 # ---------------------------------------------------------------------------
+# One tracked message per guild, stored in "staff_points_board":
+#   {guild_id, channel_id, message_id, page}
+# Running /staffstats again deletes that tracked message and posts a new
+# one. A background task edits the tracked message in place every hour so
+# it stays current without spamming the channel.
 
-class StaffLeaderboardView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, ranking: list[tuple[int, dict]], weights: dict):
-        super().__init__(timeout=180)
-        self.guild = guild
-        self.ranking = ranking
-        self.weights = weights
-        self.index = 0
-        self._sync_buttons()
+PAGE_SIZE = 6  # staff members shown per page
 
-    def _sync_buttons(self):
-        self.prev_btn.disabled = self.index <= 0
-        self.next_btn.disabled = self.index >= len(self.ranking) - 1
 
-    def build_embed(self) -> discord.Embed:
-        user_id, windows = self.ranking[self.index]
-        member = self.guild.get_member(user_id)
-        name = member.display_name if member else f"Unknown ({user_id})"
-        mention = member.mention if member else name
+def _format_member_block(rank: int, guild: discord.Guild, user_id: int, windows: dict) -> str:
+    member = guild.get_member(user_id)
+    name = member.display_name if member else f"Unknown ({user_id})"
+    mention = member.mention if member else name
 
-        embed = discord.Embed(title=f"#{self.index + 1} {name}", color=0x5865F2)
+    points_line = " • ".join(str(round(windows[w]["points"], 2)) for w in _WINDOW_KEYS)
+    lines = [f"**#{rank} {name}**", f"{mention} • **Points:** {points_line}"]
+    for label, key in _ROWS:
+        row = " • ".join(str(windows[w][key]) for w in _WINDOW_KEYS)
+        lines.append(f"**{label}:** {row}")
+    return "\n".join(lines)
 
-        points_line = " • ".join(str(round(windows[w]["points"], 2)) for w in _WINDOW_KEYS)
-        w = self.weights
-        embed.description = (
-            "**Format:** All Time • 🟢 24h • 🔵 7d • 🟣 30d\n"
-            f"**Scoring:** non-ticket msg `{w['msg_outside']}` • ticket msg `{w['msg_ticket']}` • "
-            f"rename `{w['ticket_rename']}` • close `{w['ticket_close']}` • mod action `{w['mod_action']}`\n"
-            "*Use the arrows below to page through the leaderboard.*\n\n"
-            f"{mention} • **Points:** {points_line}"
-        )
 
-        for label, key in _ROWS:
-            row = " • ".join(str(windows[w][key]) for w in _WINDOW_KEYS)
-            embed.add_field(name=label, value=row, inline=False)
+def build_board_embed(guild: discord.Guild, ranking: list[tuple[int, dict]], weights: dict,
+                       page: int, bot_user: discord.ClientUser | None):
+    """Returns (embed, resolved_page, total_pages)."""
+    total_pages = max(1, -(-len(ranking) // PAGE_SIZE))  # ceil div
+    page = max(0, min(page, total_pages - 1))
+    start = page * PAGE_SIZE
+    chunk = ranking[start:start + PAGE_SIZE]
 
-        embed.set_footer(text=f"Rank {self.index + 1} of {len(self.ranking)}")
-        return embed
+    w = weights
+    legend = (
+        "**Format:** All Time • 🟢 24h • 🔵 7d • 🟣 30d\n"
+        f"**Scoring:** non-ticket msg `{w['msg_outside']}` • ticket msg `{w['msg_ticket']}` • "
+        f"rename `{w['ticket_rename']}` • close `{w['ticket_close']}` • mod action `{w['mod_action']}`"
+    )
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    embed = discord.Embed(title=f"🏆 Staff Leaderboard (Page {page + 1}/{total_pages})", color=0x5865F2)
+
+    if not chunk:
+        embed.description = legend + "\n\nNo staff activity has been recorded yet."
+    else:
+        blocks = [legend] + [
+            _format_member_block(start + i + 1, guild, uid, windows)
+            for i, (uid, windows) in enumerate(chunk)
+        ]
+        embed.description = "\n\n".join(blocks)
+
+    footer = "Updates hourly"
+    if bot_user:
+        footer = f"Made by {bot_user.name} • {footer}"
+    embed.set_footer(text=footer)
+    return embed, page, total_pages
+
+
+class StaffLeaderboardBoardView(discord.ui.View):
+    """Persistent (timeout=None) pagination for the public board message.
+    A single instance is registered with bot.add_view() at startup so
+    button presses still route correctly after a restart; every send/edit
+    uses a freshly-built instance so the page-number label is per-message."""
+
+    def __init__(self, page: int = 0, total_pages: int = 1):
+        super().__init__(timeout=None)
+        self.page_info_btn.label = f"Page {page + 1}/{total_pages}"
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="staffpoints_board_prev")
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.index = max(0, self.index - 1)
-        self._sync_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await self._paginate(interaction, -1)
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Page 1/1", style=discord.ButtonStyle.secondary,
+                        custom_id="staffpoints_board_pageinfo", disabled=True)
+    async def page_info_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass  # display only, never actually clickable
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="staffpoints_board_next")
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.index = min(len(self.ranking) - 1, self.index + 1)
-        self._sync_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await self._paginate(interaction, 1)
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
+    async def _paginate(self, interaction: discord.Interaction, delta: int):
+        bot = interaction.client
+        db = getattr(bot, "db", None)
+        if db is None or interaction.message is None:
+            await interaction.response.defer()
+            return
+
+        board = db["staff_points_board"].find_one({"message_id": interaction.message.id})
+        if not board:
+            await interaction.response.defer()
+            return
+
+        guild = bot.get_guild(board["guild_id"])
+        if guild is None:
+            await interaction.response.defer()
+            return
+
+        ranking = _build_ranking(db, guild)
+        weights = get_weights(db, board["guild_id"])
+        new_page = board.get("page", 0) + delta
+        embed, resolved_page, total_pages = build_board_embed(guild, ranking, weights, new_page, bot.user)
+
+        db["staff_points_board"].update_one({"_id": board["_id"]}, {"$set": {"page": resolved_page}})
+        await interaction.response.edit_message(
+            embed=embed, view=StaffLeaderboardBoardView(page=resolved_page, total_pages=total_pages)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +287,13 @@ class StaffLeaderboardView(discord.ui.View):
 class StaffPoints(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Lets button presses on old board messages route correctly even
+        # after a restart, before any message has been edited this session.
+        bot.add_view(StaffLeaderboardBoardView())
+        self.refresh_loop.start()
+
+    def cog_unload(self):
+        self.refresh_loop.cancel()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -232,7 +304,47 @@ class StaffPoints(commands.Cog):
         event = "msg_ticket" if is_ticket_channel_now(message.channel) else "msg_outside"
         log_event(self.bot.db, message.guild.id, message.author.id, event)
 
-    @app_commands.command(name="staffstats", description="View the staff activity points leaderboard")
+    # ── Hourly auto-refresh of every guild's tracked board message ────────
+    @tasks.loop(hours=1)
+    async def refresh_loop(self):
+        db = self.bot.db
+        if db is None:
+            return
+        for board in list(db["staff_points_board"].find({})):
+            guild = self.bot.get_guild(board["guild_id"])
+            if not guild:
+                continue
+            channel = guild.get_channel(board["channel_id"])
+            if not channel:
+                continue
+            try:
+                msg = await channel.fetch_message(board["message_id"])
+            except discord.NotFound:
+                db["staff_points_board"].delete_one({"_id": board["_id"]})
+                continue
+            except discord.HTTPException as e:
+                print(f"[staff_points] Failed to fetch board message in guild {board['guild_id']}: {e}")
+                continue
+
+            ranking = _build_ranking(db, guild)
+            weights = get_weights(db, board["guild_id"])
+            embed, resolved_page, total_pages = build_board_embed(
+                guild, ranking, weights, board.get("page", 0), self.bot.user
+            )
+            try:
+                await msg.edit(
+                    embed=embed,
+                    view=StaffLeaderboardBoardView(page=resolved_page, total_pages=total_pages),
+                )
+            except discord.HTTPException as e:
+                print(f"[staff_points] Failed to refresh board in guild {board['guild_id']}: {e}")
+
+    @refresh_loop.before_loop
+    async def before_refresh_loop(self):
+        await self.bot.wait_until_ready()
+
+    # ── Post (or replace) the public leaderboard in this channel ──────────
+    @app_commands.command(name="staffstats", description="Post or refresh the public staff points leaderboard in this channel")
     @staff_only()
     async def staffstats(self, interaction: discord.Interaction):
         db = self.bot.db
@@ -240,16 +352,40 @@ class StaffPoints(commands.Cog):
             await interaction.response.send_message("❌ Database unavailable.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
-        ranking = _build_ranking(db, interaction.guild.id)
+        # If a board message already exists anywhere in this guild, delete it first.
+        existing = db["staff_points_board"].find_one({"guild_id": interaction.guild.id})
+        if existing:
+            old_channel = interaction.guild.get_channel(existing["channel_id"])
+            if old_channel:
+                try:
+                    old_msg = await old_channel.fetch_message(existing["message_id"])
+                    await old_msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+                except discord.HTTPException as e:
+                    print(f"[staff_points] Failed to delete old board message: {e}")
 
-        if not ranking:
-            await interaction.followup.send("No staff activity has been recorded yet.", ephemeral=True)
-            return
+        ranking = _build_ranking(db, interaction.guild)
+        weights = get_weights(db, interaction.guild.id)
+        embed, page, total_pages = build_board_embed(interaction.guild, ranking, weights, 0, self.bot.user)
 
-        view = StaffLeaderboardView(interaction.guild, ranking, get_weights(db, interaction.guild.id))
-        await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
+        await interaction.response.send_message(
+            embed=embed, view=StaffLeaderboardBoardView(page=page, total_pages=total_pages)
+        )
+        msg = await interaction.original_response()
+
+        db["staff_points_board"].update_one(
+            {"guild_id": interaction.guild.id},
+            {"$set": {
+                "guild_id":   interaction.guild.id,
+                "channel_id": interaction.channel.id,
+                "message_id": msg.id,
+                "page":       0,
+            }},
+            upsert=True,
+        )
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(StaffPoints(bot))
+

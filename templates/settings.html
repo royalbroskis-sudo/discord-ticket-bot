@@ -35,9 +35,6 @@
     <div class="nav-category">Support</div>
     <div class="nav-item" onclick="window.location.href='/transcripts'">📑 Transcripts</div>
 
-    <div class="nav-category">Integrations</div>
-    <div class="nav-item" onclick="window.location.href='/mc-login'">🎮 MC Bot Login</div>
-
     <div class="nav-category">Live Control</div>
     <div class="nav-item" onclick="window.location.href='/dashboard/{{ guild_id }}/console'">🕹️ Bot Console</div>
     <div class="nav-item" onclick="window.location.href='/dashboard/{{ guild_id }}/console/chat'">💬 Live Chat</div>
@@ -53,6 +50,7 @@
 <div class="content">
     <div class="content-inner">
         <a href="/dashboard" class="back-link">← Back to Servers</a>
+        <a href="/mc-login" style="display:inline-block; margin-bottom:20px; margin-left:10px; font-size:13px; font-weight:600; color:var(--text-muted); text-decoration:none;" onmouseover="this.style.color='var(--text-main)'" onmouseout="this.style.color='var(--text-muted)'">🎮 AFK →</a>
 
         <!-- AUTOROLE CARD -->
         <div id="autorole" class="card active">

@@ -1,702 +1,446 @@
-// mc-bot/index.js
-//
-// Multi-tenant Minecraft bridge. Each Discord user who links their own
-// Microsoft/Minecraft account gets their own persistent mineflayer bot
-// instance, keyed by their Discord user ID. Nobody can see or drive
-// anybody else's account — every route is scoped to a :discordId.
+const express = require('express');
+const mineflayer = require('mineflayer');
+const { Authflow, Titles } = require('prismarine-auth');
+const path = require('path');
+const fs = require('fs');
 
-const mineflayer      = require('mineflayer')
-const express         = require('express')
-const { MongoClient } = require('mongodb')
-const fs              = require('fs')
-const path            = require('path')
+const app = express();
+app.use(express.json());
 
-const app = express()
-app.use(express.json())
+const PORT = process.env.MC_BOT_PORT || 3001;
 
-// ── MongoDB ───────────────────────────────────────────────────────────────────
-const mongoClient = new MongoClient(process.env.MONGO_URI)
-let db = null
-const LINKS_COLLECTION = 'mc_ms_sessions' // one document per discordId — Microsoft/mineflayer session data.
-                                           // NOTE: deliberately NOT named "mc_links" — that collection is
-                                           // already used by cogs/mcpay.py for unrelated IGN bookkeeping.
+// In-memory state storage
+const states = {};
+const schedules = {}; // discordId -> array of schedule objects
 
-async function connectMongo() {
-  await mongoClient.connect()
-  db = mongoClient.db('discord_bot')
-  console.log('[MC-BOT] ✅ Connected to MongoDB')
+// Ensure cache directory exists for auth tokens
+const cacheDir = path.join(__dirname, 'cache');
+if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true });
 }
 
-// ── Per-user profiles folders (mineflayer caches MS tokens here as JSON) ──────
-const PROFILES_ROOT = path.join(__dirname, '.mc_profiles')
-if (!fs.existsSync(PROFILES_ROOT)) fs.mkdirSync(PROFILES_ROOT)
-
-function profilesDirFor(discordId) {
-  const dir = path.join(PROFILES_ROOT, discordId)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  return dir
-}
-
-// Persist a user's profiles folder to MongoDB after login
-async function backupProfiles(discordId) {
-  try {
-    const dir = profilesDirFor(discordId)
-    const files = {}
-    for (const f of fs.readdirSync(dir)) {
-      files[f] = fs.readFileSync(path.join(dir, f), 'utf8')
+function getState(discordId) {
+    if (!states[discordId]) {
+        states[discordId] = {
+            status: 'disconnected',
+            mcUsername: null,
+            ownsJava: false,
+            server: null,
+            version: 'latest',
+            error: null,
+            bot: null,
+            chatMessages: [],
+            chatIdCounter: 0,
+            requires_auth: false,
+            health: 20,
+            maxHealth: 20,
+            hunger: 20,
+            level: 0,
+            xp: 0,
+            position: { x: 0, y: 0, z: 0 },
+            code: null,
+            url: null
+        };
     }
-    if (Object.keys(files).length > 0) {
-      await db.collection(LINKS_COLLECTION).updateOne(
-        { _id: discordId },
-        { $set: { profiles: files, updated_at: new Date() } },
-        { upsert: true }
-      )
-      console.log(`[MC-BOT] [${discordId}] 💾 Profiles backed up to MongoDB`)
-    }
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to backup profiles:`, e.message)
-  }
+    return states[discordId];
 }
 
-// Restore a user's profiles from MongoDB to disk before connecting
-async function restoreProfiles(discordId) {
-  try {
-    const doc = await db.collection(LINKS_COLLECTION).findOne({ _id: discordId })
-    if (!doc?.profiles) return false
-    const dir = profilesDirFor(discordId)
-    for (const [name, content] of Object.entries(doc.profiles)) {
-      fs.writeFileSync(path.join(dir, name), content, 'utf8')
-    }
-    return true
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to restore profiles:`, e.message)
-    return false
-  }
-}
-
-// Fully wipe a user's link — disk + MongoDB
-async function clearProfiles(discordId) {
-  try {
-    const dir = profilesDirFor(discordId)
-    for (const f of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, f))
-  } catch (_) {}
-  try {
-    await db.collection(LINKS_COLLECTION).deleteOne({ _id: discordId })
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to clear link:`, e.message)
-  }
-}
-
-async function saveLook(discordId, yaw, pitch) {
-  try {
-    await db.collection(LINKS_COLLECTION).updateOne(
-      { _id: discordId },
-      { $set: { look: { yaw, pitch }, updated_at: new Date() } },
-      { upsert: true }
-    )
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to save look:`, e.message)
-  }
-}
-
-async function loadLook(discordId) {
-  try {
-    const doc = await db.collection(LINKS_COLLECTION).findOne({ _id: discordId })
-    return doc?.look ?? null
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to load look:`, e.message)
-    return null
-  }
-}
-
-async function saveMcUsername(discordId, username) {
-  try {
-    await db.collection(LINKS_COLLECTION).updateOne(
-      { _id: discordId },
-      { $set: { mc_username: username }, $setOnInsert: { linked_at: new Date() } },
-      { upsert: true }
-    )
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to save mc username:`, e.message)
-  }
-}
-
-// Whether this user *should* be connected after a restart (persisted so a
-// process restart brings everyone back to the state they left in).
-async function setDesired(discordId, desired) {
-  try {
-    await db.collection(LINKS_COLLECTION).updateOne(
-      { _id: discordId },
-      { $set: { desired, updated_at: new Date() } },
-      { upsert: true }
-    )
-  } catch (e) {
-    console.error(`[MC-BOT] [${discordId}] Failed to save desired state:`, e.message)
-  }
-}
-
-async function getAllLinkedUsers() {
-  try {
-    return await db.collection(LINKS_COLLECTION)
-      .find({ profiles: { $exists: true } }, { projection: { _id: 1, desired: 1, mc_username: 1 } })
-      .toArray()
-  } catch (e) {
-    console.error('[MC-BOT] Failed to list linked users:', e.message)
-    return []
-  }
-}
-
-// ── Per-user in-memory session state ───────────────────────────────────────
-// sessions.get(discordId) = {
-//   bot, botReady, manualDisconnect, lookSaveInterval, reconnectTimer,
-//   state: { status, code, url, error, mcUsername }
-// }
-// status: disconnected | awaiting_auth | awaiting_discord_auth | connecting | ready | error
-const sessions = new Map()
-
-function getSession(discordId) {
-  if (!sessions.has(discordId)) {
-    sessions.set(discordId, {
-      bot: null,
-      botReady: false,
-      manualDisconnect: false,
-      lookSaveInterval: null,
-      reconnectTimer: null,
-      state: { status: 'disconnected', code: null, url: null, error: null, mcUsername: null, discordId: discordId },
-      chatLog: [],   // rolling buffer of console/chat lines — { id, text, type, ts }
-      chatSeq: 0,    // monotonically increasing id, used as a poll cursor
-    })
-  }
-  return sessions.get(discordId)
-}
-
-function setState(discordId, patch) {
-  const s = getSession(discordId)
-  s.state = { ...s.state, ...patch }
-  console.log(`[MC-BOT] [${discordId}] status → ${s.state.status}${s.state.code ? ` code=${s.state.code}` : ''}`)
-}
-
-// ── Live console/chat buffer (per user) ─────────────────────────────────────
-// type: 'game' (incoming chat/system message), 'sent' (command we sent),
-// 'system' (connection lifecycle notices, e.g. connected/kicked/error)
-const CHAT_LOG_MAX = 300
-
-function pushChat(discordId, text, type = 'game') {
-  const s = getSession(discordId)
-  s.chatSeq += 1
-  s.chatLog.push({ id: s.chatSeq, text, type, ts: Date.now() })
-  if (s.chatLog.length > CHAT_LOG_MAX) {
-    s.chatLog.splice(0, s.chatLog.length - CHAT_LOG_MAX)
-  }
-}
-
-// ── Bot lifecycle (per user) ────────────────────────────────────────────────
-
-function scheduleReconnect(discordId, ms = 15000) {
-  const s = getSession(discordId)
-  if (s.reconnectTimer) return
-  s.reconnectTimer = setTimeout(async () => {
-    s.reconnectTimer = null
-    // Always try to restore this user's saved profile — never trigger a
-    // fresh MS login on an automatic reconnect.
-    const hasProfiles = await restoreProfiles(discordId)
-    if (!hasProfiles) {
-      console.log(`[MC-BOT] [${discordId}] No saved profile to reconnect with — staying disconnected.`)
-      setState(discordId, { status: 'disconnected', code: null, url: null, error: null })
-      return
-    }
-    startBot(discordId, true)
-  }, ms)
-}
-
-function startBot(discordId, hasProfiles = false) {
-  const s = getSession(discordId)
-  if (s.bot) { try { s.bot.end() } catch (_) {} }
-  s.bot      = null
-  s.botReady = false
-  setState(discordId, { status: 'connecting', code: null, url: null, error: null })
-
-  const opts = {
-    host:           process.env.MC_SERVER_HOST || 'play.donutsmp.net',
-    version:        process.env.MC_VERSION     || '1.21',
-    auth:           'microsoft',
-    profilesFolder: profilesDirFor(discordId), // isolates each user's cached MS token on disk
-  }
-
-  // Only set up device-code flow when we have NO saved session for this user.
-  // If hasProfiles is true, mineflayer will silently reuse the cached token.
-  if (!hasProfiles) {
-    opts.onMsaCode = ({ user_code, verification_uri }) => {
-      console.log(`[MC-BOT] [${discordId}] 🔑 Device code: ${user_code}`)
-      console.log(`[MC-BOT] [${discordId}] 🔗 URL: ${verification_uri}`)
-      setState(discordId, {
-        status: 'awaiting_auth',
-        code:   user_code,
-        url:    verification_uri,
-        error:  null,
-      })
-    }
-  } else {
-    console.log(`[MC-BOT] [${discordId}] 🔄 Using cached MS token — no login required`)
-  }
-
-  const bot = mineflayer.createBot(opts)
-  s.bot = bot
-
-  // Persistent console feed — every chat/system message the bot receives,
-  // whether or not anyone is actively running a command right now.
-  bot.on('message', (jsonMsg) => {
-    if (s.bot !== bot) return
-    try {
-      const text = jsonMsg.toString().trim()
-      if (text) pushChat(discordId, text, 'game')
-    } catch (_) {}
-  })
-
-  bot.on('spawn', async () => {
-    // Guard against a stale bot's late events after a restart/replace
-    if (s.bot !== bot) return
-    s.botReady = true
-    setState(discordId, { status: 'ready', code: null, url: null, error: null, mcUsername: bot.username })
-    pushChat(discordId, `✅ Connected as ${bot.username}`, 'system')
-    await backupProfiles(discordId)
-    await saveMcUsername(discordId, bot.username)
-    await setDesired(discordId, 'connected')
-
-    try {
-      const saved = await loadLook(discordId)
-      if (saved && s.bot === bot) {
-        bot.look(saved.yaw, saved.pitch, true)
-        console.log(`[MC-BOT] [${discordId}] 🧭 Restored facing direction`)
-      }
-    } catch (e) {
-      console.error(`[MC-BOT] [${discordId}] Failed to restore look:`, e.message)
-    }
-
-    if (s.lookSaveInterval) clearInterval(s.lookSaveInterval)
-    s.lookSaveInterval = setInterval(() => {
-      if (s.bot === bot && bot.entity) saveLook(discordId, bot.entity.yaw, bot.entity.pitch)
-    }, 5000)
-  })
-
-  bot.on('kicked', (reason) => {
-    if (s.bot !== bot) return
-    const msg = typeof reason === 'object' ? JSON.stringify(reason) : String(reason)
-    console.log(`[MC-BOT] [${discordId}] Kicked: ${msg}`)
-    pushChat(discordId, `⚠️ Kicked: ${msg}`, 'system')
-    s.botReady = false
-    const isAuthKick = msg.toLowerCase().includes('discord') ||
-                       msg.toLowerCase().includes('verify')  ||
-                       msg.toLowerCase().includes('authoriz')
-    if (isAuthKick) {
-      setState(discordId, { status: 'awaiting_discord_auth', code: null, url: null, error: null })
-    }
-  })
-
-  bot.on('error', (err) => {
-    if (s.bot !== bot) return
-    console.error(`[MC-BOT] [${discordId}] Error:`, err.message)
-    pushChat(discordId, `❌ Error: ${err.message}`, 'system')
-    s.botReady = false
-    setState(discordId, { status: 'error', code: null, url: null, error: err.message })
-  })
-
-  bot.on('end', (reason) => {
-    if (s.bot !== bot) return
-    console.log(`[MC-BOT] [${discordId}] Disconnected: ${reason}`)
-    pushChat(discordId, `🔌 Disconnected: ${reason}`, 'system')
-    s.botReady = false
-    if (s.lookSaveInterval) { clearInterval(s.lookSaveInterval); s.lookSaveInterval = null }
-    if (s.manualDisconnect) {
-      setState(discordId, { status: 'disconnected', code: null, url: null, error: null })
-      return
-    }
-    if (s.state.status === 'awaiting_discord_auth') {
-      // Don't reconnect — waiting for the user to click "I Authorized"
-      return
-    }
-    // Unexpected drop — schedule reconnect using this user's saved profile.
-    // "Persistent" mode: we always try to bring their bot back.
-    setState(discordId, { status: 'disconnected', code: null, url: null, error: null })
-    scheduleReconnect(discordId, 15000)
-  })
-}
-
-// ── Scheduled Commands System ──────────────────────────────────────────────
-// Each user can schedule commands to run repeatedly
-// Collection: scheduled_commands
-// Document: { discordId, command, interval, nextRun, enabled, createdAt }
-
-async function getScheduledCommands(discordId) {
-  try {
-    return await db.collection('scheduled_commands')
-      .find({ discordId, enabled: true })
-      .toArray()
-  } catch (e) {
-    console.error('[MC-BOT] Failed to get scheduled commands:', e.message)
-    return []
-  }
-}
-
-async function saveScheduledCommand(discordId, command, interval) {
-  try {
-    const now = new Date()
-    const doc = {
-      discordId,
-      command,
-      interval, // in milliseconds
-      nextRun: new Date(now.getTime() + interval),
-      enabled: true,
-      createdAt: now
-    }
-    const result = await db.collection('scheduled_commands').insertOne(doc)
-    return { ...doc, _id: result.insertedId }
-  } catch (e) {
-    console.error('[MC-BOT] Failed to save scheduled command:', e.message)
-    throw e
-  }
-}
-
-async function deleteScheduledCommand(discordId, command) {
-  try {
-    const result = await db.collection('scheduled_commands').deleteOne({
-      discordId,
-      command,
-      enabled: true
-    })
-    return result.deletedCount > 0
-  } catch (e) {
-    console.error('[MC-BOT] Failed to delete scheduled command:', e.message)
-    return false
-  }
-}
-
-async function disableScheduledCommand(discordId, command) {
-  try {
-    const result = await db.collection('scheduled_commands').updateOne(
-      { discordId, command, enabled: true },
-      { $set: { enabled: false } }
-    )
-    return result.modifiedCount > 0
-  } catch (e) {
-    console.error('[MC-BOT] Failed to disable scheduled command:', e.message)
-    return false
-  }
-}
-
-// ── Scheduler Loop ──────────────────────────────────────────────────────────
-let schedulerInterval = null
-
-async function runScheduler() {
-  try {
-    const now = new Date()
-    const dueCommands = await db.collection('scheduled_commands')
-      .find({
-        enabled: true,
-        nextRun: { $lte: now }
-      })
-      .toArray()
-
-    for (const task of dueCommands) {
-      const discordId = task.discordId
-      const s = getSession(discordId)
-      
-      // Only run if bot is connected
-      if (s.botReady && s.bot) {
-        console.log(`[MC-BOT] [${discordId}] ⏰ Running scheduled: ${task.command}`)
-        const output = []
-        const onMessage = (jsonMsg) => {
-          try {
-            const text = jsonMsg.toString().trim()
-            if (text) output.push(text)
-          } catch (_) {}
-        }
+function cleanupBot(discordId) {
+    const state = getState(discordId);
+    if (state.bot) {
         try {
-          s.bot.on('message', onMessage)
-          s.bot.chat(task.command)
-          pushChat(discordId, `⏰ » ${task.command}`, 'auto')
-          await new Promise((resolve) => setTimeout(resolve, 1500))
-          console.log(`[MC-BOT] [${discordId}] ✅ Scheduled command executed`)
-        } catch (err) {
-          console.error(`[MC-BOT] [${discordId}] Scheduled command failed:`, err.message)
-        } finally {
-          s.bot.removeListener('message', onMessage)
-        }
-      } else {
-        console.log(`[MC-BOT] [${discordId}] ⏰ Skipping scheduled command (bot not ready): ${task.command}`)
-      }
-
-      // Update next run time
-      await db.collection('scheduled_commands').updateOne(
-        { _id: task._id },
-        { $set: { nextRun: new Date(now.getTime() + task.interval) } }
-      )
+            state.bot.quit();
+        } catch (e) {}
+        state.bot = null;
     }
-  } catch (e) {
-    console.error('[MC-BOT] Scheduler error:', e.message)
-  }
+    if (!state.mcUsername) {
+        state.status = 'disconnected';
+    } else {
+        state.status = 'idle'; // Logged in but not connected to a server
+    }
+    state.server = null;
+    state.requires_auth = false;
 }
 
-// Start the scheduler (runs every 5 seconds)
-function startScheduler() {
-  if (schedulerInterval) return
-  schedulerInterval = setInterval(runScheduler, 5000)
-  console.log('[MC-BOT] ⏰ Scheduler started (check every 5s)')
+// ─── AUTHENTICATION ──────────────────────────────────────────────────────
+async function startLogin(discordId) {
+    const state = getState(discordId);
+    state.status = 'awaiting_auth';
+    state.error = null;
+    state.code = null;
+    state.url = null;
+
+    console.log(`[startLogin] Starting auth for ${discordId}`);
+
+    try {
+        // The options object with onMsaCode callback
+        const flow = new Authflow(discordId, cacheDir, {
+            authTitle: Titles.MinecraftNintendoSwitch,
+            deviceType: 'Nintendo',
+            flow: 'live'
+        }, (codeInfo) => {
+            console.log(`[startLogin] 🔑 Device code callback triggered! codeInfo:`, codeInfo);
+            // Use snake_case property names (this is the 'live' flow's response shape)
+            state.code = codeInfo.user_code;
+            state.url = codeInfo.verification_uri;
+            console.log(`[startLogin] state.code = ${state.code}, state.url = ${state.url}`);
+        });
+
+        console.log('[startLogin] Authflow created, now calling getMinecraftJavaToken()...');
+        const token = await flow.getMinecraftJavaToken({ fetchProfile: true, fetchEntitlements: true });
+        console.log('[startLogin] getMinecraftJavaToken() returned:', token ? 'yes' : 'null');
+
+        if (token && token.profile && token.profile.name) {
+            state.mcUsername = token.profile.name;
+            console.log(`[startLogin] Profile name: ${state.mcUsername}`);
+        } else {
+            state.mcUsername = `Player_${discordId.slice(-4)}`;
+            console.log(`[startLogin] No profile, using fallback: ${state.mcUsername}`);
+        }
+
+        // Real Java ownership check, based on actual entitlements rather than
+        // guessing from whether a username happened to resolve.
+        const items = token?.entitlements?.items || [];
+        state.ownsJava = items.some(i => i.name === 'game_minecraft' || i.name === 'product_minecraft');
+        console.log(`[startLogin] ownsJava: ${state.ownsJava}`);
+
+        state.status = 'idle';
+        state.code = null;   // clear after login
+        state.url = null;
+        console.log('[startLogin] Login successful, state set to idle.');
+        return { ok: true };
+    } catch (e) {
+        console.error(`[startLogin] ❌ Error during auth:`, e);
+        state.status = 'error';
+        state.code = null;   // don't leave a stale device code on screen
+        state.url = null;
+        // prismarine-auth surfaces raw upstream HTTP failures as e.g.
+        // "502 Bad Gateway <html>...". These are almost always a transient
+        // blip from Microsoft/Xbox's auth services, not a real problem.
+        const httpFail = /^\d{3}\s/.test(e.message);
+        state.error = httpFail
+            ? `Microsoft's auth service had a hiccup (${e.message.slice(0, 3)}). Please try logging in again.`
+            : e.message;
+        return { ok: false, error: state.error };
+    }
 }
 
-// ── Routes ────────────────────────────────────────────────────────────────────
-// Every route is scoped to a specific Discord user's own session.
+// ─── BOT CREATION & SERVER CONNECTION ────────────────────────────────────
+async function connectToServer(discordId, server, version) {
+    const state = getState(discordId);
+    
+    if (!state.mcUsername) {
+        return { ok: false, error: 'Not logged in. Please link Microsoft account first.' };
+    }
+
+    cleanupBot(discordId); // Destroy any existing bot instance
+
+    state.server = server;
+    state.version = version || 'latest';
+    state.status = 'connecting';
+    state.requires_auth = false;
+    state.error = null;
+
+    try {
+        const bot = mineflayer.createBot({
+            host: server,
+            port: 25565,
+            username: discordId, 
+            // mineflayer expects an actual version string (e.g. "1.20.4") or
+            // no `version` field at all to auto-negotiate with the server.
+            // The literal string "latest" isn't a real protocol version.
+            ...(state.version && state.version !== 'latest' ? { version: state.version } : {}),
+            auth: 'microsoft',
+            profilesFolder: cacheDir,
+            hideErrors: false
+        });
+        
+        state.bot = bot;
+
+        bot.on('spawn', () => {
+            state.status = 'ready';
+            state.error = null;
+            state.health = bot.health;
+            state.maxHealth = bot.game?.maxHealth || 20;
+            state.hunger = bot.food;
+            state.level = bot.experience?.level || 0;
+            state.xp = bot.experience?.points || 0;
+            state.position = bot.entity.position;
+        });
+
+        bot.on('health', () => {
+            state.health = bot.health;
+            state.hunger = bot.food;
+            if (state.status === 'ready' && bot.health <= 0) {
+                state.status = 'connecting'; // Respawning
+                setTimeout(() => {
+                    if (state.bot) state.status = 'ready';
+                }, 2000);
+            }
+        });
+
+        bot.on('experience', () => {
+            state.level = bot.experience?.level || 0;
+            state.xp = bot.experience?.points || 0;
+        });
+
+        bot.on('move', () => {
+            if (bot.entity) {
+                state.position = bot.entity.position;
+            }
+        });
+
+        bot.on('messagestr', (message) => {
+            if (message.includes('Discord') && (message.includes('authorize') || message.includes('verify') || message.includes('link'))) {
+                state.status = 'awaiting_discord_auth';
+                state.requires_auth = true;
+            }
+            state.chatMessages.push({
+                id: ++state.chatIdCounter,
+                text: message,
+                type: 'system'
+            });
+        });
+
+        bot.on('chat', (username, message) => {
+            state.chatMessages.push({
+                id: ++state.chatIdCounter,
+                text: `<${username}> ${message}`,
+                type: 'chat'
+            });
+        });
+
+        bot.on('kicked', (reason) => {
+            const reasonStr = reason.toString();
+            state.error = `Kicked: ${reasonStr}`;
+            
+            if (reasonStr.includes('Discord') || reasonStr.includes('authorize') || reasonStr.includes('verify')) {
+                state.status = 'awaiting_discord_auth';
+                state.requires_auth = true;
+            } else {
+                state.status = 'idle';
+                state.bot = null;
+            }
+        });
+
+        bot.on('error', (err) => {
+            state.status = 'error';
+            state.error = err.message;
+            state.bot = null;
+        });
+
+        bot.on('end', () => {
+            if (state.status !== 'awaiting_discord_auth' && state.status !== 'error') {
+                state.status = 'idle';
+            }
+            state.bot = null;
+        });
+
+        return { ok: true, status: 'connecting' };
+
+    } catch (e) {
+        state.status = 'error';
+        state.error = e.message;
+        return { ok: false, error: e.message };
+    }
+}
+
+// ─── SCHEDULED COMMANDS ──────────────────────────────────────────────────
+function loadSchedulesForUser(discordId) {
+    if (!schedules[discordId]) schedules[discordId] = [];
+}
+
+function checkSchedules() {
+    const now = Date.now();
+    for (const discordId in schedules) {
+        const userSchedules = schedules[discordId];
+        const state = getState(discordId);
+
+        userSchedules.forEach(s => {
+            if (s.enabled && state.status === 'ready' && state.bot) {
+                if (now >= s.nextRun) {
+                    try {
+                        state.bot.chat(s.command);
+                        s.nextRun = now + s.interval;
+                    } catch (e) {}
+                }
+            }
+        });
+    }
+}
+setInterval(checkSchedules, 5000);
+
+// ─── API ROUTES ──────────────────────────────────────────────────────────
 
 app.get('/status/:discordId', (req, res) => {
-  const state = getSession(req.params.discordId).state
-  res.json({ ...state, discordId: req.params.discordId })
-})
+    const state = getState(req.params.discordId);
+    const response = {
+        status: state.status,
+        mcUsername: state.mcUsername,
+        ownsJava: state.ownsJava,
+        server: state.server,
+        version: state.version,
+        error: state.error,
+        requires_auth: state.requires_auth,
+        health: state.health,
+        maxHealth: state.maxHealth,
+        hunger: state.hunger,
+        xpLevel: state.level,
+        xpProgress: state.xp,
+        position: state.position,
+        ping: state.bot?.player?.ping || 0,
+        code: state.code || null,
+        url: state.url || null
+    };
+    console.log(`[status] Returning for ${req.params.discordId}: status=${response.status}, code=${response.code}, url=${response.url}`);
+    res.json(response);
+});
 
-// Admin/overview: every linked account and its current live state
-app.get('/status', async (_req, res) => {
-  const linked = await getAllLinkedUsers()
-  res.json(linked.map(doc => ({ discordId: doc._id, ...getSession(doc._id).state })))
-})
+app.post('/start-login/:discordId', (req, res) => {
+    const discordId = req.params.discordId;
 
-// Link / connect — reuse saved profile if available, fresh MS login only if none exists
-app.post('/start-login/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const s = getSession(discordId)
-  if (s.botReady) return res.json({ ok: true, message: 'Already connected' })
-  s.manualDisconnect = false
-  const hasProfiles = await restoreProfiles(discordId)
-  if (hasProfiles) {
-    console.log(`[MC-BOT] [${discordId}] 🔄 Saved session found — reconnecting silently...`)
-    startBot(discordId, true)
-  } else {
-    console.log(`[MC-BOT] [${discordId}] 🔑 No saved session — starting fresh MS login...`)
-    startBot(discordId, false)
-  }
-  res.json({ ok: true })
-})
+    // Don't await this: startLogin() blocks until the user actually completes
+    // the Microsoft device-code flow (which can take minutes), but the caller
+    // (the Flask dashboard) only waits ~10s for a response. Kick the flow off
+    // in the background and respond immediately; the frontend polls
+    // /status/:discordId to pick up the code/url once onMsaCode fires, and
+    // to see the final success/error state once the flow resolves.
+    startLogin(discordId).catch(e => {
+        console.error(`[start-login] Unhandled error for ${discordId}:`, e);
+        const state = getState(discordId);
+        state.status = 'error';
+        state.error = e.message;
+    });
 
-// "I Authorized" — reconnect using saved profile
+    res.json({ ok: true, status: 'started' });
+});
+
+app.post('/connect/:discordId', async (req, res) => {
+    const { server, version } = req.body;
+    if (!server) return res.status(400).json({ ok: false, error: 'Missing server IP' });
+    
+    const result = await connectToServer(req.params.discordId, server, version);
+    res.json(result);
+});
+
 app.post('/reconnect/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const s = getSession(discordId)
-  console.log(`[MC-BOT] [${discordId}] Manual reconnect triggered`)
-  if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null }
-  s.manualDisconnect = false
-  setState(discordId, { status: 'connecting', code: null, url: null, error: null })
-  setTimeout(async () => {
-    const hasProfiles = await restoreProfiles(discordId)
-    startBot(discordId, hasProfiles)
-  }, 2000)
-  res.json({ ok: true })
-})
+    const state = getState(req.params.discordId);
+    if (state.server) {
+        const result = await connectToServer(req.params.discordId, state.server, state.version);
+        res.json(result);
+    } else {
+        res.json({ ok: false, error: 'No previous server to reconnect to.' });
+    }
+});
 
-// Leave server — keep the linked profile/token saved, will auto-reconnect
-app.post('/logout/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const s = getSession(discordId)
-  if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null }
-  s.manualDisconnect = true
-  await backupProfiles(discordId)
-  if (s.bot?.entity) await saveLook(discordId, s.bot.entity.yaw, s.bot.entity.pitch)
-  await setDesired(discordId, 'disconnected')
-  try { s.bot?.end() } catch (_) {}
-  s.bot      = null
-  s.botReady = false
-  setState(discordId, { status: 'disconnected', code: null, url: null, error: null })
-  res.json({ ok: true })
-})
+app.post('/logout/:discordId', (req, res) => {
+    cleanupBot(req.params.discordId);
+    res.json({ ok: true });
+});
 
-// Full unlink — clear everything for this user, requires fresh MS login next time
-app.post('/full-logout/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const s = getSession(discordId)
-  if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null }
-  s.manualDisconnect = true
-  await clearProfiles(discordId)
-  try { s.bot?.end() } catch (_) {}
-  s.bot      = null
-  s.botReady = false
-  setState(discordId, { status: 'disconnected', code: null, url: null, error: null, mcUsername: null })
-  sessions.delete(discordId)
-  res.json({ ok: true })
-})
+app.post('/full-logout/:discordId', (req, res) => {
+    cleanupBot(req.params.discordId);
+    states[req.params.discordId] = {
+        status: 'disconnected',
+        mcUsername: null,
+        ownsJava: false,
+        server: null,
+        version: 'latest',
+        error: null,
+        bot: null,
+        chatMessages: [],
+        chatIdCounter: 0,
+        code: null,
+        url: null
+    };
+    res.json({ ok: true });
+});
 
-// Run an in-game command as THIS user's own bot instance
-app.post('/run-command/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const { command, captureMs } = req.body
-  const s = getSession(discordId)
-
-  if (!command || typeof command !== 'string')
-    return res.status(400).json({ ok: false, error: 'Missing command' })
-  if (!s.botReady || !s.bot)
-    return res.status(503).json({ ok: false, error: 'Not connected — link/connect your account first.' })
-
-  const waitMs = Math.min(Math.max(parseInt(captureMs, 10) || 2000, 500), 8000)
-  const bot = s.bot
-  const output = []
-  const onMessage = (jsonMsg) => {
-    try {
-      const text = jsonMsg.toString().trim()
-      if (text) output.push(text)
-    } catch (_) {}
-  }
-
-  try {
-    bot.on('message', onMessage)
-    bot.chat(command)
-    pushChat(discordId, `» ${command}`, 'sent')
-    console.log(`[MC-BOT] [${discordId}] ▶ ${command}`)
-    await new Promise((resolve) => setTimeout(resolve, waitMs))
-    res.json({ ok: true, output })
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message })
-  } finally {
-    bot.removeListener('message', onMessage)
-  }
-})
-
-// ── Live Chat / Console Routes ───────────────────────────────────────────────
-// The dashboard polls GET /chat for anything newer than its last-seen id,
-// and POSTs to /chat to send a raw chat/command line — fire-and-forget,
-// the message shows up in the poll feed once mineflayer echoes it back.
+app.post('/run-command/:discordId', (req, res) => {
+    const state = getState(req.params.discordId);
+    const { command } = req.body;
+    if (state.bot && state.status === 'ready') {
+        try {
+            state.bot.chat(command);
+            res.json({ ok: true });
+        } catch (e) {
+            res.json({ ok: false, error: e.message });
+        }
+    } else {
+        res.json({ ok: false, error: 'Bot is not connected.' });
+    }
+});
 
 app.get('/chat/:discordId', (req, res) => {
-  const discordId = req.params.discordId
-  const after = parseInt(req.query.after, 10) || 0
-  const s = getSession(discordId)
-  const messages = s.chatLog.filter(m => m.id > after)
-  res.json({ ok: true, messages, lastId: s.chatSeq })
-})
+    const state = getState(req.params.discordId);
+    const after = parseInt(req.query.after) || 0;
+    const messages = state.chatMessages.filter(m => m.id > after);
+    res.json({ ok: true, messages });
+});
 
 app.post('/chat/:discordId', (req, res) => {
-  const discordId = req.params.discordId
-  const { message } = req.body
-  const s = getSession(discordId)
-
-  if (!message || typeof message !== 'string')
-    return res.status(400).json({ ok: false, error: 'Missing message' })
-  if (!s.botReady || !s.bot)
-    return res.status(503).json({ ok: false, error: 'Not connected — link/connect your account first.' })
-
-  try {
-    pushChat(discordId, `» ${message}`, 'sent')
-    s.bot.chat(message)
-    console.log(`[MC-BOT] [${discordId}] ▶ ${message}`)
-    res.json({ ok: true, lastId: s.chatSeq })
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message })
-  }
-})
-
-// ── Scheduled Commands Routes ──────────────────────────────────────────────
-
-// Schedule a command to run repeatedly
-app.post('/schedule/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const { command, interval } = req.body
-  
-  if (!command || typeof command !== 'string') {
-    return res.status(400).json({ ok: false, error: 'Missing command' })
-  }
-  
-  let intervalMs = parseInt(interval)
-  if (isNaN(intervalMs) || intervalMs < 60000) {
-    return res.status(400).json({ 
-      ok: false, 
-      error: 'Interval must be at least 60 seconds (60000ms)' 
-    })
-  }
-  
-  try {
-    const doc = await saveScheduledCommand(discordId, command, intervalMs)
-    res.json({ ok: true, message: `Scheduled "${command}" every ${intervalMs/60000}m`, command: doc })
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message })
-  }
-})
-
-// Get all scheduled commands for a user
-app.get('/schedule/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  try {
-    const commands = await getScheduledCommands(discordId)
-    res.json({ ok: true, commands })
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message })
-  }
-})
-
-// Disable a scheduled command
-app.post('/schedule/disable/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const { command } = req.body
-  
-  if (!command) {
-    return res.status(400).json({ ok: false, error: 'Missing command' })
-  }
-  
-  try {
-    const success = await disableScheduledCommand(discordId, command)
-    if (success) {
-      res.json({ ok: true, message: `Disabled scheduled command: ${command}` })
+    const state = getState(req.params.discordId);
+    const { message } = req.body;
+    if (state.bot && state.status === 'ready') {
+        try {
+            state.bot.chat(message);
+            state.chatMessages.push({
+                id: ++state.chatIdCounter,
+                text: `> ${message}`,
+                type: 'sent'
+            });
+            res.json({ ok: true });
+        } catch (e) {
+            res.json({ ok: false, error: e.message });
+        }
     } else {
-      res.json({ ok: false, error: `No active scheduled command found: ${command}` })
+        res.json({ ok: false, error: 'Bot is not connected.' });
     }
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message })
-  }
-})
+});
 
-// Delete a scheduled command completely
-app.post('/schedule/delete/:discordId', async (req, res) => {
-  const discordId = req.params.discordId
-  const { command } = req.body
-  
-  if (!command) {
-    return res.status(400).json({ ok: false, error: 'Missing command' })
-  }
-  
-  try {
-    const success = await deleteScheduledCommand(discordId, command)
-    if (success) {
-      res.json({ ok: true, message: `Deleted scheduled command: ${command}` })
+// ─── SCHEDULE ROUTES ─────────────────────────────────────────────────────
+app.get('/schedule/:discordId', (req, res) => {
+    loadSchedulesForUser(req.params.discordId);
+    res.json({ ok: true, commands: schedules[req.params.discordId] });
+});
+
+app.post('/schedule/:discordId', (req, res) => {
+    loadSchedulesForUser(req.params.discordId);
+    const { command, interval } = req.body;
+    
+    schedules[req.params.discordId] = schedules[req.params.discordId].filter(s => s.command !== command);
+    
+    const newSchedule = {
+        command,
+        interval,
+        enabled: true,
+        nextRun: Date.now() + interval
+    };
+    
+    schedules[req.params.discordId].push(newSchedule);
+    res.json({ ok: true });
+});
+
+app.post('/schedule/disable/:discordId', (req, res) => {
+    loadSchedulesForUser(req.params.discordId);
+    const { command } = req.body;
+    const sched = schedules[req.params.discordId].find(s => s.command === command);
+    if (sched) {
+        sched.enabled = false;
+        res.json({ ok: true });
     } else {
-      res.json({ ok: false, error: `No scheduled command found: ${command}` })
+        res.json({ ok: false, error: 'Schedule not found' });
     }
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message })
-  }
-})
+});
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.MC_BOT_PORT || '3001')
+app.post('/schedule/delete/:discordId', (req, res) => {
+    loadSchedulesForUser(req.params.discordId);
+    const { command } = req.body;
+    schedules[req.params.discordId] = schedules[req.params.discordId].filter(s => s.command !== command);
+    res.json({ ok: true });
+});
 
-connectMongo().then(async () => {
-  app.listen(PORT, '127.0.0.1', () =>
-    console.log(`[MC-BOT] 🌐 Listening on 127.0.0.1:${PORT}`)
-  )
-
-  // Start the scheduler
-  startScheduler()
-
-  // Persistent mode: bring back every user who was connected before the
-  // last restart. Anyone who explicitly logged out (desired='disconnected')
-  // stays disconnected until they reconnect themselves.
-  const linked = await getAllLinkedUsers()
-  for (const doc of linked) {
-    if (doc.desired === 'connected') {
-      console.log(`[MC-BOT] [${doc._id}] 🔄 Reconnecting on boot (${doc.mc_username || 'unknown'})`)
-      const hasProfiles = await restoreProfiles(doc._id)
-      if (hasProfiles) startBot(doc._id, true)
-    } else {
-      getSession(doc._id) // seed disconnected state so /status works immediately
-    }
-  }
-  console.log(`[MC-BOT] ℹ️  ${linked.length} linked account(s) known.`)
-}).catch(err => {
-  console.error('[MC-BOT] ❌ MongoDB connection failed:', err)
-  process.exit(1)
-})
-
-
+// ─── START SERVER ────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+    console.log(`✅ MC Bot Service running on port ${PORT}`);
+});

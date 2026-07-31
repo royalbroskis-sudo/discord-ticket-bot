@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        body { display: block; height: auto; min-height: 100vh; overflow: auto; }
+        .admin-wrap { max-width: 1000px; margin: 0 auto; padding: 40px 24px; }
+        .admin-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .admin-top h1 { font-size: 24px; font-weight: 800; color: var(--text-bright); }
+        .admin-top a.logout { color: var(--text-muted); text-decoration: none; font-size: 13px; font-weight: 600; }
+        .admin-top a.logout:hover { color: #f87171; }
+
+        .admin-nav { display: flex; gap: 10px; margin-bottom: 28px; flex-wrap: wrap; }
+        .admin-nav a {
+            text-decoration: none; font-size: 13px; font-weight: 700; color: var(--text-main);
+            background: var(--bg-surface); border: 1px solid var(--border); padding: 9px 16px;
+            border-radius: var(--r-sm); transition: border-color var(--transition), color var(--transition);
+        }
+        .admin-nav a:hover, .admin-nav a.active { border-color: rgba(88,101,242,0.4); color: var(--accent-light); }
+
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 32px; }
+        .stat-card {
+            background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+            padding: 20px;
+        }
+        .stat-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 700; margin-bottom: 8px; }
+        .stat-card .value { font-size: 24px; font-weight: 800; color: var(--text-bright); }
+        .stat-card .value.ok { color: #4ade80; }
+        .stat-card .value.err { color: #f87171; }
+
+        .section-title { font-size: 15px; font-weight: 700; color: var(--text-bright); margin: 30px 0 14px; }
+        .plan-row-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; }
+    </style>
+</head>
+<body>
+    <div class="admin-wrap">
+        <div class="admin-top">
+            <h1><span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:var(--accent);box-shadow:0 0 0 4px var(--accent-tint);margin-right:10px;"></span>Admin Panel</h1>
+            <a href="/admin/logout" class="logout">🚪 Log Out</a>
+        </div>
+
+        <div class="admin-nav">
+            <a href="/admin" class="active">📊 Overview</a>
+            <a href="/admin/plans">🧩 Plans &amp; Limits</a>
+            <a href="/admin/users">👤 Users</a>
+            <a href="/dashboard">← Back to Dashboard</a>
+        </div>
+
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="label">Bot Status</div>
+                <div class="value {{ 'ok' if bot_online else 'err' }}">{{ 'Online' if bot_online else 'Offline' }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Servers</div>
+                <div class="value">{{ guild_count }}</div>
+            </div>
+        </div>
+
+        <div class="section-title">AFK Plan Distribution</div>
+        <div class="plan-row-grid">
+            <div class="stat-card">
+                <div class="label">🆓 Free</div>
+                <div class="value">{{ plan_counts.free }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">⚡ Pro</div>
+                <div class="value">{{ plan_counts.pro }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">👑 Elite</div>
+                <div class="value">{{ plan_counts.elite }}</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

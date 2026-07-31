@@ -10,6 +10,7 @@ every request to the mc-bot service is scoped to the caller's Discord ID.
 import os
 import re
 import asyncio
+import logging
 import aiohttp
 import discord
 from discord.ext import commands
@@ -17,10 +18,12 @@ from discord import app_commands
 
 from cogs.config import staff_only
 
+logger = logging.getLogger(__name__)
+
 MC_BOT_URL = os.getenv("MC_BOT_URL", "http://127.0.0.1:3001")
 
-POLL_INTERVAL = 3     # seconds between status checks while waiting on login
-POLL_TIMEOUT = 300    # give up waiting after 5 minutes
+POLL_INTERVAL = 3
+POLL_TIMEOUT = 300
 
 STATUS_COLORS = {
     "ready": discord.Color.green(),
@@ -31,28 +34,30 @@ STATUS_COLORS = {
     "error": discord.Color.red(),
 }
 
-def parse_time_to_ms(time_str: str) -> int | None:
+
+def parse_time_to_ms(time_str: str):
     """Parse a time string like '1h', '30m', '2d' into milliseconds."""
     time_str = time_str.strip().lower()
     pattern = r'^(\d+)([smhd])$'
     match = re.match(pattern, time_str)
     if not match:
         return None
-    
+
     value = int(match.group(1))
     unit = match.group(2)
-    
+
     multipliers = {
-        's': 1000,           # seconds
-        'm': 60 * 1000,      # minutes
-        'h': 60 * 60 * 1000, # hours
-        'd': 24 * 60 * 60 * 1000  # days
+        's': 1000,
+        'm': 60 * 1000,
+        'h': 60 * 60 * 1000,
+        'd': 24 * 60 * 60 * 1000
     }
-    
+
     return value * multipliers[unit]
 
+
 class AuthorizedView(discord.ui.View):
-    """Shown while we're waiting on the DonutSMP Discord-DM authorization step."""
+    """Shown while we're waiting on the Discord-DM authorization step."""
 
     def __init__(self, cog: "MCLink", discord_id: str):
         super().__init__(timeout=POLL_TIMEOUT)
@@ -64,7 +69,11 @@ class AuthorizedView(discord.ui.View):
         if str(interaction.user.id) != self.discord_id:
             await interaction.response.send_message("This isn't your link session.", ephemeral=True)
             return
-        await interaction.response.defer()
+        
+        # Disable the button immediately to prevent double-clicks race conditions
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        
         await self.cog._post(f"/reconnect/{self.discord_id}")
         await self.cog._poll_until_settled(interaction, self.discord_id)
 
@@ -87,6 +96,7 @@ class MCLink(commands.Cog):
             async with self.session.get(f"{MC_BOT_URL}{path}", timeout=aiohttp.ClientTimeout(total=10)) as r:
                 return await r.json()
         except Exception as e:
+            logger.warning(f"MC bot GET {path} failed: {e}")
             return {"status": "error", "error": f"MC bot unreachable: {e}"}
 
     async def _post(self, path: str, json: dict | None = None) -> dict:
@@ -94,6 +104,7 @@ class MCLink(commands.Cog):
             async with self.session.post(f"{MC_BOT_URL}{path}", json=json, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 return await r.json()
         except Exception as e:
+            logger.warning(f"MC bot POST {path} failed: {e}")
             return {"ok": False, "error": f"MC bot unreachable: {e}"}
 
     # ── UI helpers ───────────────────────────────────────────────────────────
@@ -113,7 +124,7 @@ class MCLink(commands.Cog):
         elif s == "awaiting_discord_auth":
             embed.title = "🔔 Discord Authorization Needed"
             embed.description = (
-                "DonutSMP sent you a Discord DM asking you to authorize this login.\n"
+                "The server sent you a Discord DM asking you to authorize this login.\n"
                 "Check your DMs, click **Authorize**, then press the button below."
             )
         elif s == "connecting":
@@ -219,8 +230,7 @@ class MCLink(commands.Cog):
         """Schedule a command to run repeatedly at the specified interval."""
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
-        
-        # Validate interval
+
         interval_ms = parse_time_to_ms(interval)
         if interval_ms is None:
             await interaction.followup.send(
@@ -228,14 +238,14 @@ class MCLink(commands.Cog):
                 ephemeral=True
             )
             return
-        
-        if interval_ms < 60000:  # 60 seconds minimum
+
+        if interval_ms < 60000:
             await interaction.followup.send(
                 "❌ Interval must be at least 60 seconds (e.g., `1m`, `5m`, `1h`).",
                 ephemeral=True
             )
             return
-        
+
         # Check if already scheduled
         status = await self._get(f"/schedule/{discord_id}")
         if status.get("ok"):
@@ -246,17 +256,15 @@ class MCLink(commands.Cog):
                     ephemeral=True
                 )
                 return
-        
-        # Save the scheduled command
+
         result = await self._post(f"/schedule/{discord_id}", json={
             "command": command,
             "interval": interval_ms
         })
-        
+
         if result.get("ok"):
-            interval_display = interval
             await interaction.followup.send(
-                f"✅ Scheduled `{command}` to run every **{interval_display}**.\n"
+                f"✅ Scheduled `{command}` to run every **{interval}**.\n"
                 f"Use `/runstatus` to see all scheduled commands.",
                 ephemeral=True
             )
@@ -269,12 +277,12 @@ class MCLink(commands.Cog):
         """Show all currently scheduled commands for the user."""
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
-        
+
         result = await self._get(f"/schedule/{discord_id}")
         if not result.get("ok"):
             await interaction.followup.send(f"❌ {result.get('error', 'Failed to fetch scheduled commands')}", ephemeral=True)
             return
-        
+
         commands = result.get("commands", [])
         if not commands:
             await interaction.followup.send(
@@ -283,18 +291,17 @@ class MCLink(commands.Cog):
                 ephemeral=True
             )
             return
-        
-        # Format the response
+
         lines = ["**📋 Your Scheduled Commands:**", ""]
         for i, cmd in enumerate(commands, 1):
             interval_min = cmd["interval"] / 60000
-            if interval_min >= 1440:  # 24 hours
+            if interval_min >= 1440:
                 interval_str = f"{interval_min/1440:.1f}d"
             elif interval_min >= 60:
                 interval_str = f"{interval_min/60:.1f}h"
             else:
                 interval_str = f"{interval_min:.0f}m"
-            
+
             next_run = cmd.get("nextRun")
             if next_run:
                 try:
@@ -304,14 +311,14 @@ class MCLink(commands.Cog):
                     else:
                         next_dt = next_run
                     next_run = f"<t:{int(next_dt.timestamp())}:R>"
-                except:
+                except Exception:
                     next_run = "Unknown"
             else:
                 next_run = "Unknown"
-            
+
             lines.append(f"**{i}.** `{cmd['command']}`")
             lines.append(f"   ⏱️ Every {interval_str} | Next: {next_run}")
-        
+
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="rundisable", description="Disable a scheduled command.")
@@ -321,7 +328,7 @@ class MCLink(commands.Cog):
         """Disable a specific scheduled command."""
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
-        
+
         # Check if command exists
         status = await self._get(f"/schedule/{discord_id}")
         if status.get("ok"):
@@ -333,7 +340,7 @@ class MCLink(commands.Cog):
                     ephemeral=True
                 )
                 return
-        
+
         result = await self._post(f"/schedule/disable/{discord_id}", json={"command": command})
         if result.get("ok"):
             await interaction.followup.send(
@@ -351,15 +358,17 @@ class MCLink(commands.Cog):
         """Delete a scheduled command (remove it entirely)."""
         discord_id = str(interaction.user.id)
         await interaction.response.defer(ephemeral=True)
-        
+
         result = await self._post(f"/schedule/delete/{discord_id}", json={"command": command})
         if result.get("ok"):
             await interaction.followup.send(f"✅ Deleted scheduled command: `{command}`", ephemeral=True)
         else:
-            await interaction.followup.send(f"❌ {result.get('error', 'Failed to delete command')}", ephemeral=True)
+            error_msg = result.get("error", "Failed to delete command")
+            # Surface a clear message if the MC bot doesn't support the delete endpoint
+            if "unreachable" in error_msg.lower() or "404" in str(result):
+                error_msg += " (The MC bot may not support the delete endpoint. Use `/rundisable` instead.)"
+            await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MCLink(bot))
-
-

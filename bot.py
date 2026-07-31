@@ -9,7 +9,6 @@ import threading
 from dotenv import load_dotenv
 from db import get_bot_token, get_db
 
-# Import the Flask app from the root directory
 from app import app as flask_app
 import app as app_module
 
@@ -27,7 +26,7 @@ COGS = [
     'cogs.tickets',
     'cogs.moderation',
     'cogs.giveaway',
-    'cogs.giveaway_payment',  # <-- ADDED: Payment system
+    'cogs.giveaway_payment',
     'cogs.sticky',
     'cogs.building',
     'cogs.spawners',
@@ -51,12 +50,14 @@ COGS = [
     'cogs.ai_automod',
 ]
 
+
 class Bot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Store the MC bot subprocess so we can monitor/restart it
+        self.mc_proc = None
+
     async def setup_hook(self):
-        # Give the Flask dashboard (running in its own thread — see run_web()
-        # below) a way to reach real discord.py objects, not just raw REST.
-        # Needed by ai_agent.py's giveaway tools, which call into the live
-        # Giveaways cog instead of re-implementing it over REST.
         app_module.set_discord_bot(self)
 
         # --- MongoDB Setup ---
@@ -70,10 +71,9 @@ class Bot(commands.Bot):
             except Exception as e:
                 print(f"❌ Failed to connect to MongoDB: {e}")
 
-        # Bind the global tree error handler
         self.tree.on_error = self.on_tree_error
 
-        # ── Spawn MC bot subprocess ──────────────────────────────────────────
+        # ── Spawn MC bot subprocess ──────────────────────────────────────
         mc_bot_path = pathlib.Path(__file__).parent / "mc-bot" / "index.js"
         node_path = shutil.which("node")
 
@@ -85,14 +85,22 @@ class Bot(commands.Bot):
             mc_env = os.environ.copy()
             mc_env["MC_BOT_PORT"] = "3001"
 
-            mc_proc = subprocess.Popen(
+            self.mc_proc = subprocess.Popen(
                 [node_path, str(mc_bot_path)],
                 env=mc_env,
                 stdout=sys.stdout,
                 stderr=sys.stderr,
             )
+            print(f"✅ MC bot subprocess started (PID {self.mc_proc.pid})")
 
-            print(f"✅ MC bot subprocess started (PID {mc_proc.pid})")
+            # Start a background monitor that logs if the MC bot exits
+            def monitor_mc_bot():
+                if self.mc_proc is None:
+                    return
+                ret = self.mc_proc.wait()
+                print(f"⚠️  MC bot subprocess exited with code {ret}.")
+
+            threading.Thread(target=monitor_mc_bot, daemon=True).start()
 
         for cog in COGS:
             try:
@@ -100,8 +108,6 @@ class Bot(commands.Bot):
                 print(f'✅ {cog} loaded!')
             except Exception as e:
                 print(f'❌ Failed to load {cog}: {e}')
-
-        # rest of your code...
 
         # --- Start Web Dashboard in Background ---
         def run_web():
@@ -119,7 +125,6 @@ class Bot(commands.Bot):
 
         threading.Thread(target=run_web, daemon=True).start()
 
-    # --- Global Error Handler ---
     async def on_tree_error(
         self,
         interaction: discord.Interaction,
@@ -147,6 +152,7 @@ class Bot(commands.Bot):
 
 bot = Bot(command_prefix='!', intents=intents, help_command=None)
 
+
 @bot.event
 async def on_ready():
     print(f'✅ Bot online: {bot.user} (ID: {bot.user.id})')
@@ -155,6 +161,7 @@ async def on_ready():
         print(f'✅ Synced {len(synced)} global command(s): {[f"/{c.name}" for c in synced]}')
     except Exception as e:
         print(f'❌ Global sync failed: {e}')
+
 
 @bot.command(name='sync')
 @commands.has_permissions(administrator=True)
@@ -175,6 +182,7 @@ async def sync_commands(ctx):
     except Exception as e:
         await msg.edit(content=f'❌ Sync failed: {e}')
 
+
 @bot.command(name='reload')
 @commands.has_permissions(administrator=True)
 async def reload_cog(ctx, cog: str = ''):
@@ -188,25 +196,28 @@ async def reload_cog(ctx, cog: str = ''):
             results.append(f'❌ {c}: {e}')
     await ctx.send('\n'.join(results))
 
+
 @bot.command(name='listcogs')
 @commands.has_permissions(administrator=True)
 async def list_cogs(ctx):
     loaded = list(bot.extensions.keys())
     await ctx.send(f"Loaded cogs: {', '.join(loaded) if loaded else 'None'}")
 
+
 def main():
     token = get_bot_token()
     if not token:
         raise RuntimeError('DISCORD_BOT_TOKEN or DISCORD_TOKEN environment variable is not set.')
+
     async def run_bot():
         async with bot:
             await bot.start(token)
+
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
         print("Bot stopped by user")
 
+
 if __name__ == '__main__':
     main()
-
-

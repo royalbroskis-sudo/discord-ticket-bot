@@ -1,9 +1,11 @@
-# app.py – full file with payment log channel added
+# app.py – full file, strict state machine enforced + safe JSON parsing
 
 import os
 import time
+from functools import wraps
 from flask import Flask, render_template, redirect, request, session, Response, jsonify
 import requests
+from werkzeug.security import check_password_hash
 from dotenv import load_dotenv
 from db import get_bot_token, get_db, test_mongodb
 import ai_agent  # AI admin agent (Groq tool-calling)
@@ -13,8 +15,7 @@ from datetime import datetime, timedelta
 import logging
 
 def _parse_spawner_price(price_str) -> float:
-    """Convert '5.5m' / '500k' / '10000' style strings to a raw float. Mirrors
-    cogs/building.py's parse_price so dashboard input matches in-ticket math."""
+    """Convert '5.5m' / '500k' / '10000' style strings to a raw float."""
     if price_str is None:
         return 0.0
     s = str(price_str).strip().lower().replace(",", "")
@@ -31,7 +32,7 @@ def _parse_spawner_price(price_str) -> float:
 
 
 def _format_spawner_price(value) -> str:
-    """Reverse of _parse_spawner_price, for embed display (e.g. 5500000 -> '5.5m')."""
+    """Reverse of _parse_spawner_price, for embed display."""
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -46,9 +47,7 @@ def _format_spawner_price(value) -> str:
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Staff Points: shared helpers for the "Staff Points" settings tab + the
-# full leaderboard page. Mirrors the scoring logic in cogs/staff_points.py
-# so the dashboard always shows the exact numbers the bot is using.
+# Staff Points: shared helpers
 # ---------------------------------------------------------------------------
 
 STAFF_POINTS_DEFAULTS = {
@@ -59,7 +58,6 @@ STAFF_POINTS_DEFAULTS = {
     "PTS_MOD_ACTION":    30,
 }
 
-# event type -> dashboard config field name
 _STAFF_POINTS_FIELD_FOR_TYPE = {
     "msg_outside":   "PTS_MSG_OUTSIDE",
     "msg_ticket":    "PTS_MSG_TICKET",
@@ -72,7 +70,9 @@ _STAFF_POINTS_WINDOWS = ("all", "24h", "7d", "30d")
 
 
 def _staff_points_weights(guild_id):
-    cfg = db["staff_points_config"].find_one({"guild_id": guild_id}) or {} if db is not None else {}
+    if db is None:
+        return dict(STAFF_POINTS_DEFAULTS)
+    cfg = db["staff_points_config"].find_one({"guild_id": guild_id}) or {}
     weights = {}
     for field, default in STAFF_POINTS_DEFAULTS.items():
         raw = cfg.get(field)
@@ -89,6 +89,8 @@ def _staff_points_empty_bucket():
 
 
 def _staff_points_aggregate(guild_id, cutoff):
+    if db is None:
+        return {}
     query = {"guild_id": guild_id}
     if cutoff is not None:
         query["ts"] = {"$gte": cutoff}
@@ -128,7 +130,6 @@ def _staff_points_fmt(windows, key, is_points=False):
     return " • ".join(vals)
 
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -139,14 +140,16 @@ if not flask_secret:
     raise RuntimeError("FLASK_SECRET environment variable must be set!")
 app.secret_key = flask_secret
 
-# Force Flask to use secure cookies for HTTPS (Railway)
-app.config['SESSION_COOKIE_SECURE'] = True
+# Use secure cookies only in production (HTTPS). On localhost (HTTP) this would
+# silently destroy sessions.
+_is_production = (
+    os.getenv("RAILWAY_ENVIRONMENT") is not None
+    or os.getenv("FLASK_ENV") == "production"
+    or os.getenv("DYNO") is not None  # Heroku
+)
+app.config['SESSION_COOKIE_SECURE'] = _is_production
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
-# Keep users logged in across browser restarts until they explicitly log out.
-# Without this, Flask issues a browser-session-only cookie that gets wiped
-# whenever the browser fully closes, forcing a re-login even though the
-# Discord authorization itself is still valid.
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
@@ -156,12 +159,19 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI")
 BOT_TOKEN = get_bot_token()
 
-# Live discord.py Bot instance, wired up by bot.py right after it constructs
-# the bot (see bot.py: `app_module.set_discord_bot(bot)`). Flask runs in its own
-# thread (see bot.py's run_web()), so this is the only way the dashboard's
-# AI agent can reach real discord.py objects (needed for giveaway actions —
-# see ai_agent.py's _run_on_bot_loop) instead of talking over raw REST like
-# everything else here does.
+# ── Admin panel auth (separate from Discord OAuth) ───────────────────────────
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
+
+
+def require_admin(view_func):
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        if not session.get("is_admin"):
+            return redirect("/admin/login")
+        return view_func(*args, **kwargs)
+    return wrapped
+
 _DISCORD_BOT = None
 
 
@@ -173,7 +183,6 @@ def set_discord_bot(bot_instance):
 # Connect to MongoDB (shared singleton with the bot)
 db = get_db()
 
-# Test MongoDB connection on startup
 if db is not None:
     logger.info("🔍 Testing MongoDB connection...")
     if test_mongodb():
@@ -184,11 +193,7 @@ else:
     logger.error("❌ Could not connect to MongoDB at startup!")
 
 
-# ── Track which guilds the bot is actually a member of ──────────────────────
-# The OAuth "guilds" scope only tells us which servers the *user* manages —
-# it says nothing about whether the bot itself has been added. We fetch the
-# bot's own guild list (Bot token) and cache it briefly so we're not hitting
-# Discord on every page load.
+# ── Bot guild cache ──────────────────────────────────────────────────────────
 _bot_guild_ids_cache = {"ids": set(), "ts": 0}
 _BOT_GUILDS_CACHE_TTL = 60  # seconds
 
@@ -226,7 +231,7 @@ def get_bot_guild_ids():
     except Exception as e:
         logger.warning(f"⚠️ Failed to fetch bot guild list: {e}")
         if _bot_guild_ids_cache["ids"]:
-            return _bot_guild_ids_cache["ids"]  # serve stale cache over nothing
+            return _bot_guild_ids_cache["ids"]
 
     _bot_guild_ids_cache["ids"] = ids
     _bot_guild_ids_cache["ts"] = now
@@ -235,6 +240,127 @@ def get_bot_guild_ids():
 
 def bot_in_guild(guild_id) -> bool:
     return int(guild_id) in get_bot_guild_ids()
+
+
+# ── AFK Plans (Free / Pro / Elite) ───────────────────────────────────────────
+# These are the hard-coded fallback limits used if nothing has been saved to
+# the DB yet (i.e. the first time the admin panel is opened). Everything here
+# is editable at /admin/plans and persisted in the "plan_config" collection.
+
+PLAN_ORDER = ["free", "pro", "elite"]
+
+DEFAULT_PLAN_LIMITS = {
+    "free":  {"label": "Free",  "max_commands_per_day": 50,   "max_auto_commands": 1,  "max_sessions": 1},
+    "pro":   {"label": "Pro",   "max_commands_per_day": 500,  "max_auto_commands": 5,  "max_sessions": 3},
+    "elite": {"label": "Elite", "max_commands_per_day": 5000, "max_auto_commands": 25, "max_sessions": 10},
+}
+
+
+def get_plan_limits(plan: str) -> dict:
+    """Merged view: DB overrides on top of the hard-coded defaults."""
+    plan = plan if plan in PLAN_ORDER else "free"
+    limits = dict(DEFAULT_PLAN_LIMITS[plan])
+    if db is not None:
+        doc = db["plan_config"].find_one({"plan": plan})
+        if doc:
+            for key in ("max_commands_per_day", "max_auto_commands", "max_sessions"):
+                if key in doc and doc[key] is not None:
+                    limits[key] = doc[key]
+    return limits
+
+
+def get_all_plan_limits() -> dict:
+    return {p: get_plan_limits(p) for p in PLAN_ORDER}
+
+
+def get_user_plan(discord_id: str) -> str:
+    if db is None or not discord_id:
+        return "free"
+    doc = db["user_plan"].find_one({"discord_id": str(discord_id)})
+    plan = (doc or {}).get("plan", "free")
+    return plan if plan in PLAN_ORDER else "free"
+
+
+def set_user_plan(discord_id: str, plan: str):
+    if db is None or plan not in PLAN_ORDER:
+        return
+    db["user_plan"].update_one(
+        {"discord_id": str(discord_id)},
+        {"$set": {"plan": plan, "updated_at": datetime.utcnow()}},
+        upsert=True,
+    )
+
+
+def _today_key() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def get_daily_usage(discord_id: str) -> dict:
+    if db is None or not discord_id:
+        return {"commands_used": 0}
+    doc = db["usage_daily"].find_one({"discord_id": str(discord_id), "date": _today_key()})
+    return doc or {"commands_used": 0}
+
+
+def increment_command_usage(discord_id: str):
+    if db is None or not discord_id:
+        return
+    db["usage_daily"].update_one(
+        {"discord_id": str(discord_id), "date": _today_key()},
+        {"$inc": {"commands_used": 1}, "$set": {"last_used": datetime.utcnow()}},
+        upsert=True,
+    )
+
+
+def get_active_auto_command_count(discord_id: str) -> int:
+    if db is None or not discord_id:
+        return 0
+    doc = db["auto_command_count"].find_one({"discord_id": str(discord_id)})
+    return max(0, (doc or {}).get("count", 0))
+
+
+def bump_active_auto_command_count(discord_id: str, delta: int):
+    if db is None or not discord_id:
+        return
+    db["auto_command_count"].update_one(
+        {"discord_id": str(discord_id)},
+        {"$inc": {"count": delta}},
+        upsert=True,
+    )
+    db["auto_command_count"].update_one(
+        {"discord_id": str(discord_id), "count": {"$lt": 0}},
+        {"$set": {"count": 0}},
+    )
+
+
+def get_afk_user_overview(limit: int = 200):
+    """Best-effort combined view of everyone who has touched the AFK / dashboard
+    features, pulled from user_plan, usage_daily, and auto_command_count —
+    there's no single canonical "users" collection, so we union what we have."""
+    if db is None:
+        return []
+    ids = set()
+    for coll in ("user_plan", "usage_daily", "auto_command_count", "user_settings"):
+        for doc in db[coll].find({}, {"discord_id": 1}).limit(limit):
+            if doc.get("discord_id"):
+                ids.add(str(doc["discord_id"]))
+
+    rows = []
+    for discord_id in ids:
+        plan = get_user_plan(discord_id)
+        limits = get_plan_limits(plan)
+        usage = get_daily_usage(discord_id)
+        rows.append({
+            "discord_id": discord_id,
+            "plan": plan,
+            "plan_label": limits["label"],
+            "commands_used": usage.get("commands_used", 0),
+            "commands_limit": limits["max_commands_per_day"],
+            "auto_active": get_active_auto_command_count(discord_id),
+            "auto_limit": limits["max_auto_commands"],
+        })
+    rows.sort(key=lambda r: r["commands_used"], reverse=True)
+    return rows
 
 
 @app.route("/")
@@ -251,6 +377,104 @@ def login():
     return redirect(
         f"https://discord.com/api/oauth2/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=identify%20guilds"
     )
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    if session.get("is_admin"):
+        return redirect("/admin")
+
+    if request.method == "POST":
+        if not ADMIN_USERNAME or not ADMIN_PASSWORD_HASH:
+            logger.error("❌ ADMIN_USERNAME / ADMIN_PASSWORD_HASH not set in environment.")
+            return render_template("admin_login.html", error=True)
+
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+
+        if username == ADMIN_USERNAME and check_password_hash(ADMIN_PASSWORD_HASH, password):
+            session.clear()
+            session["is_admin"] = True
+            session.permanent = True
+            return redirect("/admin")
+
+        return render_template("admin_login.html", error=True)
+
+    return render_template("admin_login.html")
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("is_admin", None)
+    return redirect("/admin/login")
+
+
+@app.route("/admin")
+@require_admin
+def admin_panel():
+    plan_counts = {"free": 0, "pro": 0, "elite": 0}
+    if db is not None:
+        for p in PLAN_ORDER:
+            plan_counts[p] = db["user_plan"].count_documents({"plan": p})
+    return render_template(
+        "admin_panel.html",
+        bot_online=(_DISCORD_BOT is not None and _DISCORD_BOT.is_ready() if _DISCORD_BOT else False),
+        guild_count=len(get_bot_guild_ids()),
+        plan_counts=plan_counts,
+    )
+
+
+@app.route("/admin/plans", methods=["GET", "POST"])
+@require_admin
+def admin_plans():
+    if request.method == "POST":
+        if db is None:
+            return render_template("admin_plans.html", plans=get_all_plan_limits(), error="Database unavailable — changes were not saved.")
+
+        for plan in PLAN_ORDER:
+            try:
+                max_cmds = int(request.form.get(f"{plan}_max_commands_per_day", 0))
+                max_auto = int(request.form.get(f"{plan}_max_auto_commands", 0))
+                max_sessions = int(request.form.get(f"{plan}_max_sessions", 0))
+            except (TypeError, ValueError):
+                continue
+            db["plan_config"].update_one(
+                {"plan": plan},
+                {"$set": {
+                    "max_commands_per_day": max(0, max_cmds),
+                    "max_auto_commands": max(0, max_auto),
+                    "max_sessions": max(0, max_sessions),
+                    "updated_at": datetime.utcnow(),
+                }},
+                upsert=True,
+            )
+        return redirect("/admin/plans?saved=1")
+
+    return render_template(
+        "admin_plans.html",
+        plans=get_all_plan_limits(),
+        saved=request.args.get("saved") == "1",
+    )
+
+
+@app.route("/admin/users")
+@require_admin
+def admin_users():
+    search = (request.args.get("q") or "").strip()
+    users = get_afk_user_overview()
+    if search:
+        users = [u for u in users if search in u["discord_id"]]
+    return render_template("admin_users.html", users=users, search=search, plan_order=PLAN_ORDER)
+
+
+@app.route("/admin/users/<discord_id>/plan", methods=["POST"])
+@require_admin
+def admin_set_user_plan(discord_id):
+    plan = request.form.get("plan", "free")
+    if plan not in PLAN_ORDER:
+        plan = "free"
+    set_user_plan(discord_id, plan)
+    return redirect("/admin/users")
 
 
 @app.route("/callback")
@@ -279,24 +503,25 @@ def callback():
     if "access_token" not in tokens:
         return redirect("/")
 
-    # Make this a long-lived session (see PERMANENT_SESSION_LIFETIME above)
-    # instead of a browser-session-only cookie.
     session.permanent = True
     session["access_token"] = tokens["access_token"]
 
-    # Store which Discord user this is, so per-user features (like the MC
-    # account link) know whose session to scope requests to.
+    # Fetch and store the Discord user identity. If this fails, force re-login
+    # so that per-user features (MC link, settings) don't silently break.
     me_response = requests.get(
         "https://discord.com/api/users/@me",
         headers={"Authorization": f"Bearer {session['access_token']}", "User-Agent": "DashboardBot/1.0"},
     )
     me = me_response.json()
-    if isinstance(me, dict) and "id" in me:
-        session["discord_user"] = {
-            "id": me["id"],
-            "username": me.get("username"),
-            "avatar": me.get("avatar"),
-        }
+    if not isinstance(me, dict) or "id" not in me:
+        session.clear()
+        return redirect("/?error=auth_failed")
+
+    session["discord_user"] = {
+        "id": me["id"],
+        "username": me.get("username"),
+        "avatar": me.get("avatar"),
+    }
 
     guild_response = requests.get(
         "https://discord.com/api/users/@me/guilds",
@@ -305,7 +530,8 @@ def callback():
     guilds = guild_response.json()
 
     if not isinstance(guilds, list):
-        return redirect("/")
+        session.clear()
+        return redirect("/?error=auth_failed")
 
     manageable_guilds = [
         g
@@ -372,7 +598,7 @@ def view_transcript(transcript_id):
 
     try:
         obj_id = ObjectId(transcript_id)
-    except:
+    except Exception:
         abort(404)
 
     transcript = db["transcripts"].find_one({"_id": obj_id})
@@ -399,7 +625,7 @@ def view_transcript_raw(transcript_id):
 
     try:
         obj_id = ObjectId(transcript_id)
-    except:
+    except Exception:
         abort(404)
 
     transcript = db["transcripts"].find_one({"_id": obj_id})
@@ -422,12 +648,10 @@ def guild_dashboard(guild_id):
     if "access_token" not in session:
         return redirect("/")
 
-    # Verify the logged-in user actually has access to this guild
     user_guild_ids = [int(g["id"]) for g in session.get("guilds", [])]
     if guild_id not in user_guild_ids:
         abort(403)
 
-    # The bot itself must be in the server before there's anything to configure
     if not bot_in_guild(guild_id):
         return redirect(f"/dashboard?bot_missing={guild_id}")
 
@@ -612,15 +836,13 @@ def guild_dashboard(guild_id):
                     json={"embeds": [embed_payload], "components": [component]},
                 )
 
-        # In app.py, the building_config form type handler (already present):
-
         elif form_type == "building_config":
             builder_role = request.form.get("BUILDER_ROLE_ID")
             ticket_ping = request.form.get("BUILD_TICKET_PING_ROLE_ID")
             order_ping = request.form.get("BUILD_ORDER_PING_ROLE_ID")
             payment_method = request.form.get("PAYMENT_METHOD", "")
             payment_receiver_ign = request.form.get("PAYMENT_RECEIVER_IGN", "").strip()
-            payment_log_channel_id = request.form.get("PAYMENT_LOG_CHANNEL_ID")  # <-- This captures the channel
+            payment_log_channel_id = request.form.get("PAYMENT_LOG_CHANNEL_ID")
 
             db["bot_config"].update_one(
                 {"guild_id": guild_id},
@@ -630,7 +852,7 @@ def guild_dashboard(guild_id):
                     "BUILD_ORDER_PING_ROLE_ID": int(order_ping) if order_ping and order_ping != "none" else None,
                     "PAYMENT_METHOD": payment_method.strip() if payment_method else "",
                     "PAYMENT_RECEIVER_IGN": payment_receiver_ign if payment_receiver_ign else None,
-                    "PAYMENT_LOG_CHANNEL_ID": int(payment_log_channel_id) if payment_log_channel_id and payment_log_channel_id != "none" else None,  # <-- This saves it
+                    "PAYMENT_LOG_CHANNEL_ID": int(payment_log_channel_id) if payment_log_channel_id and payment_log_channel_id != "none" else None,
                     "BUILDER_T1_ROLE_ID": None,
                     "BUILDER_T2_ROLE_ID": None,
                     "BUILDER_T3_ROLE_ID": None,
@@ -861,14 +1083,12 @@ def guild_dashboard(guild_id):
 
     bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
 
-    # Fetch Roles
     roles_res = requests.get(f"https://discord.com/api/v10/guilds/{guild_id}/roles", headers=bot_headers)
     if roles_res.status_code != 200:
         logger.error(f"❌ ROLES FETCH FAILED: {roles_res.status_code} - {roles_res.text}")
     roles = roles_res.json() if roles_res.status_code == 200 else []
     roles = [r for r in roles if r["name"] != "@everyone" and not r["managed"]]
 
-    # Fetch Channels
     chans_res = requests.get(f"https://discord.com/api/v10/guilds/{guild_id}/channels", headers=bot_headers)
     if chans_res.status_code != 200:
         logger.error(f"❌ CHANNELS FETCH FAILED: {chans_res.status_code} - {chans_res.text}")
@@ -876,7 +1096,6 @@ def guild_dashboard(guild_id):
     text_channels = [c for c in channels if c["type"] == 0]
     category_channels = [c for c in channels if c["type"] == 4]
 
-    # Fetch Settings
     settings = {
         "autorole": db["autorole_settings"].find_one({"guild_id": guild_id}),
         "welcome": db["welcome_settings"].find_one({"guild_id": guild_id}),
@@ -901,7 +1120,6 @@ def guild_dashboard(guild_id):
         "command_perms": {doc["command_name"]: doc["roles"] for doc in db["command_perms"].find({"guild_id": guild_id})},
         "building": {
             "config": db["bot_config"].find_one({"guild_id": guild_id}) or {},
-            # The config includes PAYMENT_LOG_CHANNEL_ID
             "builds": (db["building_panels"].find_one({"guild_id": guild_id}) or {}).get("builds", [])
         },
         "spawners": {
@@ -942,7 +1160,6 @@ def commands_dashboard(guild_id):
             return jsonify({"success": False, "error": "Database connection not available"}), 500
         return "<h1>Error: Database connection not available!</h1>", 500
 
-    # ------------------------------------------------------------------ POST
     if request.method == "POST":
         form_type = request.form.get("form_type")
         logger.info(f"[CMD_PERMS] POST received | guild={guild_id} | form_type={form_type!r}")
@@ -951,13 +1168,11 @@ def commands_dashboard(guild_id):
             logger.warning(f"[CMD_PERMS] Unknown form_type: {form_type!r}")
             return jsonify({"success": False, "error": f"Unknown form_type: {form_type}"}), 400
 
-        # --- log every raw form field so we can see exactly what arrived ----
         logger.info("[CMD_PERMS] ---- RAW FORM DUMP START ----")
         for k in request.form.keys():
             logger.info(f"[CMD_PERMS]   {k!r} => {request.form.getlist(k)!r}")
         logger.info("[CMD_PERMS] ---- RAW FORM DUMP END ----")
 
-        # --- check db is still alive before touching it --------------------
         try:
             db.command("ping")
             logger.info("[CMD_PERMS] ✅ MongoDB ping OK before save")
@@ -975,7 +1190,6 @@ def commands_dashboard(guild_id):
 
                 command_name = key[8:]  # strip "has_cmd_"
 
-                # MultiDict.keys() can yield the same key more than once
                 if command_name in seen_commands:
                     logger.warning(f"[CMD_PERMS] Duplicate key skipped: {command_name!r}")
                     continue
@@ -1003,7 +1217,6 @@ def commands_dashboard(guild_id):
                             f"upserted_id={result.upserted_id}"
                         )
 
-                        # immediate read-back to confirm it landed
                         verify = db["command_perms"].find_one(
                             {"guild_id": guild_id, "command_name": command_name}
                         )
@@ -1024,7 +1237,6 @@ def commands_dashboard(guild_id):
                         raise
 
                 else:
-                    # no roles selected → delete the document
                     try:
                         result = db["command_perms"].delete_one(
                             {"guild_id": guild_id, "command_name": command_name}
@@ -1045,7 +1257,6 @@ def commands_dashboard(guild_id):
                         logger.error(f"[CMD_PERMS] ❌ DB error deleting {command_name!r}: {db_err}", exc_info=True)
                         raise
 
-            # final state dump
             all_saved = list(db["command_perms"].find({"guild_id": guild_id}))
             logger.info(f"[CMD_PERMS] ---- FINAL DB STATE ({len(all_saved)} docs) ----")
             for doc in all_saved:
@@ -1063,13 +1274,12 @@ def commands_dashboard(guild_id):
             logger.error(f"[CMD_PERMS] ❌ Unhandled exception during save: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
-    # ------------------------------------------------------------------ GET
+    # GET
     if not BOT_TOKEN:
         return "<h1>Error: Discord bot token missing!</h1>", 500
 
     bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
 
-    # Fetch roles from Discord
     try:
         roles_res = requests.get(f"https://discord.com/api/v10/guilds/{guild_id}/roles", headers=bot_headers)
         logger.info(f"[CMD_PERMS] Discord roles fetch | status={roles_res.status_code}")
@@ -1087,10 +1297,8 @@ def commands_dashboard(guild_id):
         logger.error(f"[CMD_PERMS] ❌ Exception fetching roles: {e}", exc_info=True)
         roles = []
 
-    # Fetch saved command permissions from MongoDB
     command_perms = {}
     try:
-        # ping first so we know if db is reachable
         db.command("ping")
         logger.info("[CMD_PERMS] ✅ MongoDB ping OK on GET")
 
@@ -1125,10 +1333,6 @@ def commands_dashboard(guild_id):
     )
 
 
-## ─────────────────────────────────────────────────────────────────────────
-## Build Tracker Dashboard (unchanged)
-## ─────────────────────────────────────────────────────────────────────────
-
 @app.route("/dashboard/<int:guild_id>/builds")
 def builds_dashboard(guild_id):
     """Build tracker: active orders + builder stats."""
@@ -1145,15 +1349,13 @@ def builds_dashboard(guild_id):
     if db is None:
         return "<h1>Error: Database connection not available!</h1>", 500
 
-    guilds = session.get("guilds", [])
-    if not any(int(g["id"]) == guild_id for g in guilds):
-        abort(403)
-
-    guild_name = next((g["name"] for g in guilds if int(g["id"]) == guild_id), "Unknown Server")
+    guild_name = next(
+        (g["name"] for g in session.get("guilds", []) if int(g["id"]) == guild_id),
+        "Unknown Server"
+    )
 
     all_orders = list(db["building_orders"].find({"guild_id": guild_id}))
 
-    # Resolve Discord usernames via bot token
     user_cache = {}
     bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
 
@@ -1196,7 +1398,6 @@ def builds_dashboard(guild_id):
     completed_orders = [fmt_order(o) for o in all_orders if o.get("status") == "completed"]
     cancelled_orders = [fmt_order(o) for o in all_orders if o.get("status") == "cancelled"]
 
-    # Builder stats
     builder_map = {}
     for order in all_orders:
         bid = order.get("builder_id")
@@ -1241,6 +1442,7 @@ def builds_dashboard(guild_id):
         builder_stats=builder_stats,
     )
 
+
 @app.route("/dashboard/<int:guild_id>/builds/delete", methods=["POST"])
 def delete_build_order(guild_id):
     if "access_token" not in session:
@@ -1252,9 +1454,7 @@ def delete_build_order(guild_id):
         return jsonify({"success": False, "error": "Bot is not in this server"}), 403
     if db is None:
         return jsonify({"success": False, "error": "Database unavailable"}), 500
-    guilds = session.get("guilds", [])
-    if not any(int(g["id"]) == guild_id for g in guilds):
-        return jsonify({"success": False, "error": "Forbidden"}), 403
+
     data = request.get_json()
     order_id = data.get("order_id") if data else None
     if not order_id:
@@ -1278,31 +1478,36 @@ def test_mongodb_route():
     if db is None:
         return jsonify({"error": "Database not connected"}), 500
     try:
-        test_guild = 999999
-        test_cmd = "_test_command_"
-        result = db["command_perms"].update_one(
-            {"guild_id": test_guild, "command_name": test_cmd},
-            {"$set": {"roles": ["test_role"], "guild_id": test_guild, "command_name": test_cmd}},
+        # Use a dedicated test collection — don't pollute command_perms
+        test_coll = db["_test_connection"]
+        result = test_coll.update_one(
+            {"_test": True},
+            {"$set": {"roles": ["test_role"], "ts": datetime.utcnow()}},
             upsert=True
         )
-        doc = db["command_perms"].find_one({"guild_id": test_guild, "command_name": test_cmd})
-        db["command_perms"].delete_one({"guild_id": test_guild, "command_name": test_cmd})
+        doc = test_coll.find_one({"_test": True})
+        test_coll.delete_one({"_test": True})
         return jsonify({
             "success": True,
             "insert_result": str(result.raw_result),
             "document_found": doc is not None,
-            "document": str(doc)
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# ─────────────────────────────────────────────────────────────────────
-# ADD THESE TO app.py before `if __name__ == "__main__":`
-# ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
+# Minecraft AFK Bot proxy endpoints
+# ─────────────────────────────────────────────────────────────────────────
 
 MC_BOT_URL = os.getenv("MC_BOT_URL", "http://127.0.0.1:3001")
 
+def _safe_json(r):
+    """Safely parse JSON from a requests.Response object."""
+    try:
+        return r.json()
+    except Exception:
+        return {"status": "error", "error": f"Invalid response from MC bot (HTTP {r.status_code})"}
 
 def _current_discord_id():
     """The Discord user ID of whoever is logged into the dashboard right now."""
@@ -1314,7 +1519,6 @@ def mc_login():
     if "access_token" not in session:
         return redirect("/")
     if not _current_discord_id():
-        # Old session predating the discord_user field — force a fresh login
         return redirect("/login")
     return render_template("mc_login.html")
 
@@ -1326,7 +1530,7 @@ def mc_status():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         r = requests.get(f"{MC_BOT_URL}/status/{discord_id}", timeout=5)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"status": "error", "error": f"MC bot unreachable: {e}"}), 503
 
@@ -1338,7 +1542,7 @@ def mc_start_login():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         r = requests.post(f"{MC_BOT_URL}/start-login/{discord_id}", timeout=10)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
@@ -1350,83 +1554,143 @@ def mc_reconnect():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         r = requests.post(f"{MC_BOT_URL}/reconnect/{discord_id}", timeout=10)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
 @app.route("/mc-logout", methods=["POST"])
 def mc_logout():
-    # Leave server but keep token — bot will reconnect next time
+    """Disconnect from the Minecraft server but keep the saved Microsoft token.
+    The bot will NOT reconnect automatically — the user must press Reconnect
+    (or have Auto Reconnect enabled in Settings and reload the page)."""
     discord_id = _current_discord_id()
     if not discord_id:
         return jsonify({"error": "Unauthorized"}), 401
     try:
         r = requests.post(f"{MC_BOT_URL}/logout/{discord_id}", timeout=10)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
 @app.route("/mc-full-logout", methods=["POST"])
 def mc_full_logout():
-    # Disconnect AND wipe saved token (forces re-login next time)
+    """Disconnect AND wipe the saved Microsoft token. Next time the user wants
+    to connect they'll have to go through the full Microsoft sign-in flow."""
     discord_id = _current_discord_id()
     if not discord_id:
         return jsonify({"error": "Unauthorized"}), 401
     try:
         r = requests.post(f"{MC_BOT_URL}/full-logout/{discord_id}", timeout=10)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
 @app.route("/mc-run-command", methods=["POST"])
 def mc_run_command():
-    # Run an in-game command as the logged-in user's own linked account
     discord_id = _current_discord_id()
     if not discord_id:
         return jsonify({"error": "Unauthorized"}), 401
+
+    plan = get_user_plan(discord_id)
+    limits = get_plan_limits(plan)
+    usage = get_daily_usage(discord_id)
+    if usage.get("commands_used", 0) >= limits["max_commands_per_day"]:
+        return jsonify({
+            "ok": False,
+            "error": f"Daily command limit reached ({limits['max_commands_per_day']}/day on the {limits['label']} plan). Upgrade for more."
+        }), 429
+
     try:
         r = requests.post(f"{MC_BOT_URL}/run-command/{discord_id}", json=request.get_json(silent=True) or {}, timeout=12)
-        return jsonify(r.json())
+        result = _safe_json(r)
+        if result.get("ok") is not False:
+            increment_command_usage(discord_id)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
+@app.route("/mc-usage")
+def mc_usage():
+    discord_id = _current_discord_id()
+    if not discord_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    plan = get_user_plan(discord_id)
+    limits = get_plan_limits(plan)
+    usage = get_daily_usage(discord_id)
+    return jsonify({
+        "ok": True,
+        "plan": plan,
+        "plan_label": limits["label"],
+        "commands_used": usage.get("commands_used", 0),
+        "commands_limit": limits["max_commands_per_day"],
+        "auto_active": get_active_auto_command_count(discord_id),
+        "auto_limit": limits["max_auto_commands"],
+    })
+
+
 @app.route("/mc-chat")
 def mc_chat_get():
-    # Live console poll — anything newer than ?after=<lastId>
     discord_id = _current_discord_id()
     if not discord_id:
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     after = request.args.get("after", 0)
     try:
         r = requests.get(f"{MC_BOT_URL}/chat/{discord_id}", params={"after": after}, timeout=5)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
 @app.route("/mc-chat", methods=["POST"])
 def mc_chat_post():
-    # Send a raw chat line / command as the logged-in user's own linked account
     discord_id = _current_discord_id()
     if not discord_id:
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         r = requests.post(f"{MC_BOT_URL}/chat/{discord_id}", json=request.get_json(silent=True) or {}, timeout=10)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
-# ── ADD THESE ROUTES TO app.py ────────────────────────────────────────────────
-# Paste before the `if __name__ == "__main__":` line
-# These handle the ticket type + panel builder at /dashboard/<guild_id>/tickets
+@app.route("/mc-connect", methods=["POST"])
+def mc_connect():
+    """Connect to a Minecraft server. Saves the server address to user settings
+    on success so that Auto Reconnect knows where to reconnect."""
+    discord_id = _current_discord_id()
+    if not discord_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    server = data.get("server")
+    version = data.get("version", "latest")
+    if not server:
+        return jsonify({"ok": False, "error": "Missing server"}), 400
 
-from bson import ObjectId as _ObjId
+    try:
+        r = requests.post(f"{MC_BOT_URL}/connect/{discord_id}", json={"server": server, "version": version}, timeout=15)
+        resp = _safe_json(r)
 
+        # Persist last_server ONLY on a successful connection (not when auth
+        # is still pending). This lets Auto Reconnect rejoin the same server
+        # later without the user having to type the address again.
+        if not resp.get("requires_auth") and (resp.get("ok") or resp.get("status") == "ready"):
+            if db is not None:
+                db["user_settings"].update_one(
+                    {"discord_id": discord_id},
+                    {"$set": {"settings.last_server": server}},
+                    upsert=True
+                )
+
+        return jsonify(resp)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
+# ── Ticket builder ───────────────────────────────────────────────────────────
 
 @app.route("/dashboard/<int:guild_id>/tickets", methods=["GET", "POST"])
 def tickets_dashboard(guild_id):
@@ -1449,7 +1713,6 @@ def tickets_dashboard(guild_id):
     if request.method == "POST":
         form_type = request.form.get("form_type")
 
-        # ── Create / update ticket type ───────────────────────────────────
         if form_type == "save_ticket_type":
             type_id  = request.form.get("type_id", "").strip()
             name     = request.form.get("name", "").strip()
@@ -1484,17 +1747,15 @@ def tickets_dashboard(guild_id):
             }
 
             if type_id:
-                db["ticket_types"].update_one({"_id": _ObjId(type_id)}, {"$set": doc})
+                db["ticket_types"].update_one({"_id": ObjectId(type_id)}, {"$set": doc})
             else:
                 db["ticket_types"].insert_one(doc)
 
-        # ── Delete ticket type ────────────────────────────────────────────
         elif form_type == "delete_ticket_type":
             type_id = request.form.get("type_id", "").strip()
             if type_id:
-                db["ticket_types"].delete_one({"_id": _ObjId(type_id)})
+                db["ticket_types"].delete_one({"_id": ObjectId(type_id)})
 
-        # ── Create / update panel ─────────────────────────────────────────
         elif form_type == "save_panel":
             panel_id     = request.form.get("panel_id", "").strip()
             panel_name   = request.form.get("panel_name", "").strip()
@@ -1521,27 +1782,24 @@ def tickets_dashboard(guild_id):
             }
 
             if panel_id:
-                db["ticket_panels"].update_one({"_id": _ObjId(panel_id)}, {"$set": pdoc})
+                db["ticket_panels"].update_one({"_id": ObjectId(panel_id)}, {"$set": pdoc})
             else:
                 db["ticket_panels"].insert_one(pdoc)
 
-        # ── Delete panel ──────────────────────────────────────────────────
         elif form_type == "delete_panel":
             panel_id = request.form.get("panel_id", "").strip()
             if panel_id:
-                db["ticket_panels"].delete_one({"_id": _ObjId(panel_id)})
+                db["ticket_panels"].delete_one({"_id": ObjectId(panel_id)})
 
-        # ── Post panel to a channel ───────────────────────────────────────
         elif form_type == "post_panel":
             panel_id   = request.form.get("panel_id", "").strip()
             channel_id = request.form.get("channel_id", "").strip()
 
-            panel = db["ticket_panels"].find_one({"_id": _ObjId(panel_id)}) if panel_id else None
+            panel = db["ticket_panels"].find_one({"_id": ObjectId(panel_id)}) if panel_id else None
             if panel and channel_id:
                 type_ids = panel.get("ticket_type_ids", [])
-                types    = list(db["ticket_types"].find({"_id": {"$in": [_ObjId(t) for t in type_ids]}}))
+                types    = list(db["ticket_types"].find({"_id": {"$in": [ObjectId(t) for t in type_ids]}}))
 
-                # Build components (buttons)
                 components = []
                 row_items  = []
                 for i, tt in enumerate(types[:5]):
@@ -1577,14 +1835,12 @@ def tickets_dashboard(guild_id):
     ticket_types = list(db["ticket_types"].find({"guild_id": guild_id}))
     panels       = list(db["ticket_panels"].find({"guild_id": guild_id}))
 
-    # Convert ObjectIds to strings for the template
     for t in ticket_types:
         t["_id"] = str(t["_id"])
         t["color_hex"] = f"#{t.get('color', 0x5865F2):06x}"
     for p in panels:
         p["_id"]   = str(p["_id"])
         p["color_hex"] = f"#{p.get('color', 0x5865F2):06x}"
-        # Attach type names for display
         assigned_ids = p.get("ticket_type_ids", [])
         p["assigned_types"] = [
             t for t in ticket_types if t["_id"] in assigned_ids
@@ -1605,8 +1861,7 @@ def tickets_dashboard(guild_id):
 
 @app.route("/dashboard/<int:guild_id>/staffpoints")
 def staff_points_dashboard(guild_id):
-    """Full staff points leaderboard — every staff member, every category,
-    every time window, on one page."""
+    """Full staff points leaderboard."""
     if "access_token" not in session:
         return redirect("/")
     user_guild_ids = [int(g["id"]) for g in session.get("guilds", [])]
@@ -1620,12 +1875,16 @@ def staff_points_dashboard(guild_id):
     weights = _staff_points_weights(guild_id)
     ranking = _staff_points_ranking(guild_id)
 
-    # Resolve display names in one call rather than one request per member.
     bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
     members_res = requests.get(
         f"https://discord.com/api/v10/guilds/{guild_id}/members?limit=1000", headers=bot_headers
     )
-    members = members_res.json() if members_res.status_code == 200 else []
+    if members_res.status_code == 200:
+        members = members_res.json()
+    else:
+        if members_res.status_code == 429:
+            logger.warning("Rate limited fetching guild members for staff points")
+        members = []
     member_names = {
         int(m["user"]["id"]): (m.get("nick") or m["user"]["username"])
         for m in members if "user" in m
@@ -1655,7 +1914,8 @@ def staff_points_dashboard(guild_id):
         rows=rows,
     )
 
-# ── Bot Console: run bot actions on-demand from the dashboard ───────────────
+
+# ── Bot Console ──────────────────────────────────────────────────────────────
 
 def _discord_api(method, path, reason=None, **kwargs):
     """Thin wrapper around the Discord REST API using the bot token."""
@@ -1680,9 +1940,7 @@ def _discord_err(r):
 
 
 def _require_guild_access_json(guild_id):
-    """For AJAX/JSON routes: verify the session can manage this guild.
-    Returns a Flask response to short-circuit with if access fails, else None.
-    Logs the mismatch so a stale-session issue is provable from the logs."""
+    """For AJAX/JSON routes: verify the session can manage this guild."""
     if "access_token" not in session:
         return jsonify({"ok": False, "error": "Your session has expired. Please log out and log back in."}), 401
 
@@ -1695,8 +1953,7 @@ def _require_guild_access_json(guild_id):
         )
         return jsonify({
             "ok": False,
-            "error": "Your session no longer shows access to this server (permissions changed, or the "
-                     "dashboard was redeployed since you logged in). Please log out and log back in.",
+            "error": "Your session no longer shows access to this server. Please log out and log back in.",
         }), 403
     return None
 
@@ -1828,7 +2085,7 @@ def bot_console(guild_id):
                 reason = request.form.get("reason", "").strip() or "No reason given"
                 minutes = request.form.get("minutes", "10")
                 try:
-                    minutes = max(1, min(40320, int(minutes)))  # Discord max is 28 days
+                    minutes = max(1, min(40320, int(minutes)))
                 except ValueError:
                     minutes = 10
                 if not user_id:
@@ -1878,7 +2135,7 @@ def bot_console(guild_id):
         msg = error or "Done."
         return redirect(f"/dashboard/{guild_id}/console?status={status}&msg={msg}")
 
-    # ── GET: render the console ──────────────────────────────────────────
+    # GET
     bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "User-Agent": "DashboardBot/1.0"}
 
     roles_res = requests.get(f"https://discord.com/api/v10/guilds/{guild_id}/roles", headers=bot_headers)
@@ -1910,7 +2167,7 @@ def bot_console(guild_id):
 
 @app.route("/dashboard/<int:guild_id>/console/lookup")
 def console_lookup_user(guild_id):
-    """AJAX helper: search guild members by name so staff can grab a user ID."""
+    """AJAX helper: search guild members by name."""
     if "access_token" not in session:
         return jsonify([]), 401
 
@@ -1943,14 +2200,9 @@ def console_lookup_user(guild_id):
 
 
 # ── AI Admin Agent ───────────────────────────────────────────────────────────
-# Natural-language console: staff type a request, Groq decides which tool(s)
-# to call. Read-only tools (lookups, summaries) run immediately; anything
-# that changes the server comes back as a "pending_action" that the UI shows
-# as a Confirm/Cancel step before it's actually executed.
 
 @app.route("/dashboard/<int:guild_id>/console/agent")
 def bot_agent(guild_id):
-    """Renders the AI agent chat page."""
     if "access_token" not in session:
         return redirect("/")
 
@@ -1973,7 +2225,6 @@ def bot_agent(guild_id):
 
 @app.route("/dashboard/<int:guild_id>/console/agent/chat", methods=["POST"])
 def bot_agent_chat(guild_id):
-    """AJAX: run one turn of the agent. Body: { message, history }."""
     access_error = _require_guild_access_json(guild_id)
     if access_error:
         return access_error
@@ -2000,7 +2251,6 @@ def bot_agent_chat(guild_id):
 
 @app.route("/dashboard/<int:guild_id>/console/agent/execute", methods=["POST"])
 def bot_agent_execute(guild_id):
-    """AJAX: execute a destructive tool call the user confirmed. Body: { tool, args }."""
     access_error = _require_guild_access_json(guild_id)
     if access_error:
         return access_error
@@ -2094,7 +2344,6 @@ def _bot_user_id():
 
 @app.route("/dashboard/<int:guild_id>/console/chat")
 def bot_chat(guild_id):
-    """Live chat view: read a channel's recent messages and reply/send/forward as the bot."""
     if "access_token" not in session:
         return redirect("/")
 
@@ -2125,7 +2374,6 @@ def bot_chat(guild_id):
 
 @app.route("/dashboard/<int:guild_id>/console/chat/messages")
 def chat_fetch_messages(guild_id):
-    """AJAX: fetch a channel's messages. Pass ?after=<id> to poll for new ones only."""
     access_error = _require_guild_access_json(guild_id)
     if access_error:
         return access_error
@@ -2163,7 +2411,7 @@ def chat_fetch_messages(guild_id):
         return jsonify({"error": friendly, "discord_code": discord_code}), r.status_code
 
     messages = [_serialize_message(m) for m in r.json()]
-    messages.sort(key=lambda m: m["id"])  # ascending, oldest first
+    messages.sort(key=lambda m: m["id"])
     return jsonify({"messages": messages})
 
 
@@ -2200,9 +2448,6 @@ def chat_send_message(guild_id):
 
 @app.route("/dashboard/<int:guild_id>/console/chat/forward", methods=["POST"])
 def chat_forward_message(guild_id):
-    """Copies a message's content (and attachment links) into another channel,
-    clearly labelled as forwarded. (Uses a labelled copy rather than Discord's
-    native forward snapshot, so it works reliably across API versions.)"""
     if "access_token" not in session:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     access_error = _require_guild_access_json(guild_id)
@@ -2255,80 +2500,183 @@ def chat_delete_message(guild_id):
         return jsonify({"ok": False, "error": _discord_err(r)}), r.status_code
     return jsonify({"ok": True})
 
-# app.py - Add these routes near the other MC routes
+
+# ── User Settings API ─────────────────────────────────────────────────────────
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    if "access_token" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    discord_id = session.get("discord_user", {}).get("id")
+    if not discord_id:
+        return jsonify({"error": "User not identified"}), 400
+    if db is None:
+        return jsonify({"error": "Database unavailable"}), 500
+
+    doc = db["user_settings"].find_one({"discord_id": discord_id})
+    default_settings = {
+        "theme": "dark",
+        "accent_color": "#8B5CF6",
+        "ui_scale": 1,
+        "desktop_notifications": True,
+        "connection_alerts": True,
+        "error_notifications": True,
+        "last_server": None,
+        "last_version": "latest"
+    }
+    if doc:
+        settings = doc.get("settings", {})
+        for k, v in default_settings.items():
+            if k not in settings:
+                settings[k] = v
+        return jsonify({"settings": settings})
+    else:
+        return jsonify({"settings": default_settings})
+
+
+@app.route("/api/settings", methods=["POST"])
+def save_settings():
+    if "access_token" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    discord_id = session.get("discord_user", {}).get("id")
+    if not discord_id:
+        return jsonify({"error": "User not identified"}), 400
+    data = request.get_json() or {}
+    settings = data.get("settings")
+    if settings is None:
+        return jsonify({"error": "Missing settings"}), 400
+
+    valid_keys = {
+        "theme", "accent_color",
+        "ui_scale", "desktop_notifications", "connection_alerts",
+        "error_notifications", "last_server", "last_version"
+    }
+    filtered = {k: v for k, v in settings.items() if k in valid_keys}
+    if not filtered:
+        return jsonify({"error": "No valid settings"}), 400
+
+    if db is None:
+        return jsonify({"error": "Database unavailable"}), 500
+
+    db["user_settings"].update_one(
+        {"discord_id": discord_id},
+        {"$set": {"settings": filtered}},
+        upsert=True
+    )
+    return jsonify({"success": True, "settings": filtered})
+
+
+# ── MC Schedule ──────────────────────────────────────────────────────────────
 
 @app.route("/mc-schedule/<discord_id>", methods=["GET"])
 def mc_get_schedule(discord_id):
-    """Get all scheduled commands for a user."""
     if "access_token" not in session:
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
-    
-    # Verify this is the logged-in user
+
     current_id = _current_discord_id()
     if not current_id or current_id != discord_id:
         return jsonify({"ok": False, "error": "Forbidden"}), 403
-    
+
     try:
         r = requests.get(f"{MC_BOT_URL}/schedule/{discord_id}", timeout=5)
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
+
 @app.route("/mc-schedule/<discord_id>", methods=["POST"])
 def mc_add_schedule(discord_id):
-    """Add a scheduled command."""
     if "access_token" not in session:
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
-    
+
     current_id = _current_discord_id()
     if not current_id or current_id != discord_id:
         return jsonify({"ok": False, "error": "Forbidden"}), 403
-    
+
     data = request.get_json(silent=True) or {}
     command = data.get("command")
     interval = data.get("interval")
-    
+
     if not command or not interval:
         return jsonify({"ok": False, "error": "Command and interval required"}), 400
-    
+
+    plan = get_user_plan(discord_id)
+    limits = get_plan_limits(plan)
+    active = get_active_auto_command_count(discord_id)
+    if active >= limits["max_auto_commands"]:
+        return jsonify({
+            "ok": False,
+            "error": f"Auto-command limit reached ({limits['max_auto_commands']} on the {limits['label']} plan). Upgrade for more."
+        }), 429
+
     try:
         r = requests.post(
             f"{MC_BOT_URL}/schedule/{discord_id}",
             json={"command": command, "interval": interval},
             timeout=10
         )
-        return jsonify(r.json())
+        result = _safe_json(r)
+        if result.get("ok") is not False:
+            bump_active_auto_command_count(discord_id, 1)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
+
 @app.route("/mc-schedule/disable/<discord_id>", methods=["POST"])
 def mc_disable_schedule(discord_id):
-    """Disable a scheduled command."""
     if "access_token" not in session:
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
-    
+
     current_id = _current_discord_id()
     if not current_id or current_id != discord_id:
         return jsonify({"ok": False, "error": "Forbidden"}), 403
-    
+
     data = request.get_json(silent=True) or {}
     command = data.get("command")
-    
+
     if not command:
         return jsonify({"ok": False, "error": "Command required"}), 400
-    
+
     try:
         r = requests.post(
             f"{MC_BOT_URL}/schedule/disable/{discord_id}",
             json={"command": command},
             timeout=10
         )
-        return jsonify(r.json())
+        return jsonify(_safe_json(r))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
+@app.route("/mc-schedule/delete/<discord_id>", methods=["POST"])
+def mc_delete_schedule(discord_id):
+    if "access_token" not in session:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    current_id = _current_discord_id()
+    if not current_id or current_id != discord_id:
+        return jsonify({"ok": False, "error": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    command = data.get("command")
+
+    if not command:
+        return jsonify({"ok": False, "error": "Command required"}), 400
+
+    try:
+        r = requests.post(
+            f"{MC_BOT_URL}/schedule/delete/{discord_id}",
+            json={"command": command},
+            timeout=10
+        )
+        result = _safe_json(r)
+        if result.get("ok") is not False:
+            bump_active_auto_command_count(discord_id, -1)
+        return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 503
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
-
-

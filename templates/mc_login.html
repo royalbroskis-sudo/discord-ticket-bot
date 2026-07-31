@@ -1,646 +1,1915 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MC Bot Login</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <style>
-    body {
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      padding: 24px;
-      overflow: auto;
-    }
-    .layout {
-      display: flex;
-      align-items: flex-start;
-      justify-content: center;
-      gap: 24px;
-      width: 100%;
-      max-width: 1120px;
-      margin: 0 auto;
-    }
-    .mc-card {
-      display: block;
-      background: var(--bg-surface); border: 1px solid var(--border);
-      border-radius: var(--r-xl); padding: 44px 36px;
-      width: 100%; max-width: 380px; flex: 0 0 380px; text-align: center;
-      position: relative; overflow: hidden;
-      box-shadow: var(--shadow-soft);
-      animation: cardIn 0.4s var(--transition-slow) both;
-      order: 2;
-    }
-    .mc-card::before {
-      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    }
-    .icon { font-size: 46px; margin-bottom: 16px; filter: drop-shadow(0 4px 16px var(--accent-glow)); }
-    h1 { font-size: 21px; font-weight: 800; margin-bottom: 8px; color: var(--text-bright); letter-spacing: -0.02em; }
-    .sub { color: var(--text-muted); font-size: 13.5px; margin-bottom: 26px; line-height: 1.65; }
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aura AFK</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  /* ── Base & Tokens ── */
+  :root{
+    --bg:#0F1117;
+    --bg-elev:#151824;
+    --panel: rgba(255,255,255,0.035);
+    --panel-strong: rgba(255,255,255,0.05);
+    --border: rgba(255,255,255,0.08);
+    --border-soft: rgba(255,255,255,0.06);
+    --accent:#8B5CF6;
+    --accent-dim:#6D28D9;
+    --grad: linear-gradient(135deg,#8B5CF6 0%, #6366F1 50%, #3B82F6 100%);
+    --text:#E7E9F2;
+    --text-dim:#9AA1B4;
+    --text-faint:#6B7286;
+    --ok:#34D399;
+    --warn:#FBBF24;
+    --danger:#F87171;
+    --r-xl:22px;
+    --r-lg:18px;
+    --r-md:14px;
+    --r-sm:10px;
+    --shadow: 0 20px 60px rgba(0,0,0,0.5);
+    --transition: .22s cubic-bezier(.4,0,.2,1);
+    --scale:1;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    min-height:100vh;
+    background:
+      radial-gradient(circle at 15% 10%, rgba(139,92,246,0.14), transparent 40%),
+      radial-gradient(circle at 85% 90%, rgba(59,130,246,0.14), transparent 45%),
+      var(--bg);
+    color:var(--text);
+    font-family:'Inter',system-ui,sans-serif;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+    transition:background .3s;
+  }
+  a{color:inherit;}
+  ::selection{background:rgba(139,92,246,.4);}
+  ::-webkit-scrollbar{width:5px;height:5px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:99px;}
+  ::-webkit-scrollbar-thumb:hover{background:var(--text-faint);}
 
-    .badge {
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 6px 16px; border-radius: 999px; border: 1px solid transparent;
-      font-size: 12.5px; font-weight: 700; margin-bottom: 24px;
-      text-transform: uppercase; letter-spacing: 0.03em;
-    }
-    .badge.ready               { background: var(--success-tint); color: #4ade80; border-color: rgba(34,197,94,0.25); }
-    .badge.connecting          { background: var(--info-tint); color: #60a5fa; border-color: rgba(59,130,246,0.25); }
-    .badge.awaiting_auth       { background: var(--warning-tint); color: #fbbf24; border-color: rgba(245,158,11,0.25); }
-    .badge.awaiting_discord_auth { background: rgba(168,85,247,0.12); color: #c084fc; border-color: rgba(168,85,247,0.25); }
-    .badge.disconnected        { background: var(--bg-muted); color: var(--text-muted); border-color: var(--border); }
-    .badge.error               { background: var(--danger-tint); color: #f87171; border-color: rgba(239,68,68,0.25); }
+  @keyframes fadeUp{ from{opacity:0; transform:translateY(14px) scale(.98);} to{opacity:1; transform:none;}}
+  @keyframes shimmer{ 0%{background-position:-200% 0;} 100%{background-position:200% 0;}}
+  @keyframes pulse{ 0%,100%{opacity:1} 50%{opacity:.25} }
 
-    .dot { width:8px; height:8px; border-radius:50%; background:currentColor; }
-    .dot.pulse { animation: pulse 1.4s ease-in-out infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+  #toast-container{
+    position:fixed; bottom:24px; right:24px; z-index:999;
+    display:flex; flex-direction:column; gap:10px; max-width:360px; width:100%;
+  }
+  .toast{
+    padding:14px 18px; border-radius:var(--r-md); background:var(--bg-elev);
+    border:1px solid var(--border); backdrop-filter:blur(12px);
+    box-shadow:0 12px 40px rgba(0,0,0,0.5);
+    display:flex; align-items:center; gap:12px;
+    animation:fadeUp .3s var(--transition) both;
+    font-size:13px; font-weight:500;
+  }
+  .toast .icon{font-size:18px; flex-shrink:0;}
+  .toast .msg{flex:1;}
+  .toast.success{border-color:var(--ok);}
+  .toast.success .icon{color:var(--ok);}
+  .toast.error{border-color:var(--danger);}
+  .toast.error .icon{color:var(--danger);}
+  .toast.warning{border-color:var(--warn);}
+  .toast.warning .icon{color:var(--warn);}
+  .toast.info{border-color:var(--accent);}
+  .toast.info .icon{color:var(--accent);}
 
-    .code-box {
-      background: var(--input-bg); border: 1px solid var(--border);
-      border-radius: var(--r-lg); padding: 22px; margin-bottom: 20px;
-    }
-    .code-box p { color: var(--text-muted); font-size:13px; margin-bottom:12px; }
-    .code { font-size:30px; font-weight:800; letter-spacing:6px; color:#fbbf24; margin-bottom:16px; text-shadow: 0 0 20px rgba(251,191,36,0.3); }
-    .code-box a {
-      display:inline-block; background: var(--accent); color:#fff;
-      text-decoration:none; padding:10px 22px; border-radius: var(--r-sm);
-      font-size:13px; font-weight:700; transition: all var(--transition);
-    }
-    .code-box a:hover { background: var(--accent-mid); box-shadow: 0 4px 16px var(--accent-glow); transform: translateY(-1px); }
+  /* ── HERO ── */
+  #hero-view{
+    display:none;
+    width:100%; max-width:460px;
+    text-align:center;
+    animation:fadeUp .5s var(--transition) both;
+  }
+  body.view-login #hero-view{ display:block; }
 
-    .discord-box {
-      background: rgba(88,101,242,0.08); border: 1px solid rgba(139,149,247,0.25);
-      border-radius: var(--r-lg); padding: 22px; margin-bottom: 20px;
-    }
-    .discord-box p { color: var(--accent-light); font-size:14px; line-height:1.65; margin-bottom:14px; }
+  .hero-logo{
+    width:76px;height:76px;margin:0 auto 26px;border-radius:24px;
+    background:var(--grad);
+    display:flex;align-items:center;justify-content:center;
+    font-size:36px;
+    box-shadow:0 12px 40px rgba(139,92,246,0.45);
+  }
+  .hero-title{
+    font-size:34px;font-weight:900;letter-spacing:-0.03em;margin:0 0 8px;
+    background:linear-gradient(135deg,#fff, #C4B5FD 60%, #93C5FD);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .hero-sub{font-size:15px;font-weight:600;color:var(--text-dim);margin:0 0 14px;}
+  .hero-desc{font-size:14px;color:var(--text-faint);line-height:1.6;margin:0 0 34px;}
 
-    .btn {
-      width:100%; padding: 13px; border:none; border-radius: var(--r-sm);
-      font-size:14.5px; font-weight:700; cursor:pointer;
-      transition: all var(--transition); margin-bottom:10px;
-      font-family: inherit;
-    }
-    .btn:last-child { margin-bottom:0; }
-    .btn:disabled { opacity:.4; cursor:not-allowed; }
-    .btn:hover:not(:disabled) { transform: translateY(-1px); }
-    .btn-login     { background: var(--accent); color:#fff; }
-    .btn-login:hover:not(:disabled) { background: var(--accent-mid); box-shadow: 0 4px 16px var(--accent-glow); }
-    .btn-authorized{ background:#7c3aed; color:#fff; }
-    .btn-authorized:hover:not(:disabled) { background:#6d28d9; box-shadow: 0 4px 16px rgba(124,58,237,0.35); }
-    .btn-leave     { background: var(--bg-muted); color: var(--text-main); }
-    .btn-leave:hover:not(:disabled) { background: var(--bg-overlay); }
-    .btn-signout   { background: var(--danger-tint); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
-    .btn-signout:hover:not(:disabled) { background: rgba(239,68,68,0.18); box-shadow: 0 4px 14px rgba(239,68,68,0.2); }
+  .btn-ms{
+    width:100%;
+    display:flex;align-items:center;justify-content:center;gap:10px;
+    padding:16px 22px;
+    border:none;border-radius:var(--r-lg);
+    background:var(--grad);
+    color:#fff;font-size:15px;font-weight:700;
+    cursor:pointer;
+    box-shadow:0 10px 34px rgba(99,102,241,0.4);
+    transition:transform var(--transition), box-shadow var(--transition), opacity var(--transition);
+    font-family:inherit;
+  }
+  .btn-ms:hover{ transform:translateY(-2px); box-shadow:0 16px 44px rgba(99,102,241,0.55); }
+  .btn-ms:disabled{ opacity:.5; cursor:not-allowed; transform:none; }
+  .btn-ms svg{ width:19px; height:19px; }
 
-    .schedule-section {
-      margin-top: 20px;
-      padding: 16px;
-      background: var(--bg-muted);
-      border-radius: var(--r-lg);
-      border: 1px solid var(--border);
-      text-align: left;
-    }
-    .schedule-section h3 {
-      color: var(--text-bright);
-      font-size: 16px;
-      margin-bottom: 12px;
-      text-align: center;
-    }
-    .schedule-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 12px;
-      background: var(--input-bg);
-      border-radius: var(--r-sm);
-      margin-bottom: 6px;
-      font-size: 13px;
-      gap: 8px;
-    }
-    .schedule-item .cmd {
-      color: var(--accent-light);
-      font-family: monospace;
-      flex: 1;
-    }
-    .schedule-item .interval {
-      color: var(--text-muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .schedule-item .btn-sm {
-      padding: 4px 12px;
-      font-size: 11px;
-      border: none;
-      border-radius: var(--r-sm);
-      cursor: pointer;
-      background: var(--danger-tint);
-      color: #f87171;
-      transition: all var(--transition);
-    }
-    .schedule-item .btn-sm:hover {
-      background: rgba(239,68,68,0.2);
-    }
-    .schedule-form {
-      display: flex;
-      gap: 8px;
-      margin-top: 12px;
-      flex-wrap: wrap;
-    }
-    .schedule-form input {
-      flex: 1;
-      min-width: 100px;
-      padding: 8px 12px;
-      background: var(--input-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--r-sm);
-      color: var(--text-main);
-      font-size: 13px;
-    }
-    .schedule-form input::placeholder {
-      color: var(--text-faint);
-    }
-    .schedule-form .btn-add {
-      padding: 8px 16px;
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: var(--r-sm);
-      cursor: pointer;
-      font-weight: 700;
-      font-size: 13px;
-      transition: all var(--transition);
-    }
-    .schedule-form .btn-add:hover {
-      background: var(--accent-mid);
-    }
-    .schedule-empty {
-      color: var(--text-muted);
-      font-size: 13px;
-      text-align: center;
-      padding: 8px 0;
-    }
+  .hero-checks{
+    margin-top:26px;
+    display:flex; flex-wrap:wrap; gap:10px 20px;
+    align-items:center; justify-content:center;
+    font-size:12.5px; color:var(--text-faint); font-weight:600;
+  }
+  .hero-checks span{ display:flex; align-items:center; gap:6px; }
+  .hero-checks .tick{ color:var(--ok); font-weight:900; }
 
-    .hint { margin-top:22px; font-size:11.5px; color: var(--text-faint); line-height:1.8; text-align: left; }
-    .hint code { color: var(--accent-light); background: var(--accent-tint); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+  /* ── MS AUTH VIEW ── */
+  #ms-auth-view {
+    display:none;
+    width:100%; max-width:460px;
+    text-align:center;
+    animation:fadeUp .5s var(--transition) both;
+  }
+  body.view-ms-auth #ms-auth-view { display:block; }
 
-    .console-section {
-      order: 1;
-      flex: 1 1 640px;
-      max-width: 700px;
-      min-width: 0;
-      align-self: stretch;
-      background: var(--bg-surface); border: 1px solid var(--border);
-      border-radius: var(--r-xl);
-      padding: 28px 26px;
-      text-align: left;
-      box-shadow: var(--shadow-soft);
-      display: flex;
-      flex-direction: column;
-      animation: cardIn 0.4s var(--transition-slow) both;
-    }
-    .console-section h3 {
-      color: var(--text-bright);
-      font-size: 17px;
-      margin-bottom: 14px;
-      text-align: left;
-    }
-    .console-log {
-      flex: 1 1 auto;
-      height: min(64vh, 620px);
-      overflow-y: auto;
-      background: var(--input-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--r-sm);
-      padding: 10px 12px;
-      font-family: 'SFMono-Regular', Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.6;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .console-log .line { word-break: break-word; white-space: pre-wrap; }
-    .console-log .line.sent   { color: var(--accent-light); }
-    .console-log .line.auto   { color: #fb923c; }
-    .console-log .line.system { color: #fbbf24; font-style: italic; }
-    .console-log .line.game   { color: var(--text-main); }
-    .console-log .empty { color: var(--text-faint); text-align: center; padding: 8px 0; }
-    .console-log .ts { color: var(--text-faint); margin-right: 6px; }
+  .code-box, .discord-box{
+    border-radius:var(--r-md); padding:20px; margin-bottom:18px; text-align:left;
+    background:var(--panel-strong); border:1px solid var(--border);
+  }
+  .code-box p, .discord-box p{ color:var(--text-dim); font-size:13px; line-height:1.6; margin:0 0 12px; }
+  .code{
+    font-size:28px; font-weight:900; letter-spacing:6px; text-align:center;
+    color:#FDE68A; margin-bottom:14px; text-shadow:0 0 24px rgba(251,191,36,.35);
+  }
+  .code-box a{
+    display:block; text-align:center;
+    background:var(--grad); color:#fff; text-decoration:none;
+    padding:11px 18px; border-radius:var(--r-sm); font-size:13px; font-weight:700;
+    transition:transform var(--transition);
+  }
+  .code-box a:hover{ transform:translateY(-1px); }
 
-    .console-form {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-    }
-    .console-form input {
-      flex: 1;
-      padding: 10px 12px;
-      background: var(--input-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--r-sm);
-      color: var(--text-main);
-      font-size: 13px;
-      font-family: 'SFMono-Regular', Consolas, monospace;
-    }
-    .console-form input::placeholder { color: var(--text-faint); }
-    .console-form .btn-send {
-      padding: 10px 20px;
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: var(--r-sm);
-      cursor: pointer;
-      font-weight: 700;
-      font-size: 13px;
-      transition: all var(--transition);
-    }
-    .console-form .btn-send:hover:not(:disabled) { background: var(--accent-mid); }
-    .console-form .btn-send:disabled { opacity: .4; cursor: not-allowed; }
+  #ms-auth-error {
+    margin-top:12px;
+    padding:10px;
+    border-radius:var(--r-sm);
+    background:rgba(248,113,113,0.1);
+    border:1px solid rgba(248,113,113,0.2);
+    color:var(--danger);
+    font-size:13px;
+    font-weight:600;
+    display:none;
+  }
 
-    @media (max-width: 900px) {
-      .layout { flex-direction: column; align-items: stretch; }
-      .mc-card { order: 1; max-width: 100%; flex: 0 0 auto; }
-      .console-section { order: 2; max-width: 100%; flex: 0 0 auto; }
-      .console-log { height: 320px; }
-    }
-  </style>
+  /* ── ACCOUNT VIEW ── */
+  #account-view{
+    display:none;
+    width:100%; max-width:420px;
+    padding:38px 32px;
+    text-align:center;
+    position:relative; overflow:hidden;
+    animation:fadeUp .45s var(--transition) both;
+  }
+  body.view-account #account-view { display:block; }
+
+  .glass{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:var(--r-xl);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow:var(--shadow);
+    transition:transform var(--transition), box-shadow var(--transition);
+  }
+  .glass:hover{ transform:translateY(-2px); box-shadow:var(--shadow), 0 8px 30px rgba(139,92,246,0.08); }
+
+  #account-view::before{
+    content:''; position:absolute; inset:0 0 auto 0; height:3px;
+    background:var(--grad);
+  }
+  .acct-avatar{
+    width:88px; height:88px; border-radius:20px; margin:0 auto 16px;
+    background:var(--panel-strong); border:1px solid var(--border);
+    object-fit:cover; box-shadow:0 10px 30px rgba(0,0,0,.4);
+  }
+  .acct-username{ font-size:20px; font-weight:800; letter-spacing:-.02em; margin:0 0 4px; }
+  .acct-sub{ font-size:12.5px; color:var(--text-faint); margin:0 0 22px; }
+
+  .acct-row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:13px 16px; margin-bottom:10px; text-align:left;
+    background:var(--panel-strong); border:1px solid var(--border); border-radius:var(--r-md);
+  }
+  .acct-row .label{ font-size:12px; color:var(--text-faint); font-weight:600; }
+  .acct-row .value{ font-size:12.5px; font-weight:700; color:var(--text); }
+  .acct-row .value.ok{ color:var(--ok); }
+  .acct-row .value.bad{ color:var(--danger); }
+
+  .acct-actions{ display:flex; flex-direction:column; gap:10px; margin-top:20px; }
+  .btn{
+    width:100%; padding:13px; border:none; border-radius:var(--r-sm);
+    font-size:14px; font-weight:700; cursor:pointer; margin-bottom:10px;
+    font-family:inherit; transition:transform var(--transition), box-shadow var(--transition), opacity var(--transition);
+  }
+  .btn:last-child{ margin-bottom:0; }
+  .btn:disabled{ opacity:.4; cursor:not-allowed; }
+  .btn:hover:not(:disabled){ transform:translateY(-1px); }
+  .btn-join{ background:var(--grad); color:#fff; box-shadow:0 8px 26px rgba(99,102,241,.35); }
+  .btn-logout{ background:rgba(248,113,113,.1); color:var(--danger); border:1px solid rgba(248,113,113,.28); }
+
+  /* ── CONNECTING SCREEN ── */
+  #connecting-view{
+    display:none; width:100%; max-width:420px; padding:40px 34px; text-align:center;
+    animation:fadeUp .4s var(--transition) both;
+  }
+  body.view-connecting #connecting-view { display:block; }
+
+  .conn-icon{
+    width:64px;height:64px;margin:0 auto 22px;border-radius:18px;
+    background:var(--grad); display:flex;align-items:center;justify-content:center;font-size:28px;
+    box-shadow:0 10px 34px rgba(139,92,246,.4);
+    animation:spin 2.2s linear infinite;
+  }
+  @keyframes spin{ from{transform:rotate(0)} to{transform:rotate(360deg)} }
+  #connecting-view h2{ font-size:18px; font-weight:800; margin:0 0 26px; }
+  .conn-steps{ text-align:left; margin-bottom:24px; }
+  .conn-step{
+    display:flex; align-items:center; gap:10px; padding:9px 0;
+    font-size:13px; color:var(--text-faint); font-weight:600;
+    transition:color var(--transition);
+  }
+  .conn-step .mark{ width:18px; text-align:center; flex-shrink:0; }
+  .conn-step.active{ color:var(--text); }
+  .conn-step.done{ color:var(--ok); }
+  .conn-progress{
+    height:6px; border-radius:99px; background:var(--panel-strong);
+    overflow:hidden; border:1px solid var(--border);
+  }
+  .conn-progress-bar{
+    height:100%; width:0%; background:var(--grad); border-radius:99px;
+    transition:width .5s cubic-bezier(.4,0,.2,1);
+  }
+
+  /* ── APP SHELL (post‑connect) ── */
+  #shell{
+    display:none; width:100%; min-height:100vh;
+  }
+  body.view-app #shell { display:flex; }
+  body.view-app { align-items:stretch; padding:0; }
+
+  .sidebar{
+    flex:0 0 232px; min-height:100vh; padding:22px 14px;
+    background:var(--bg-elev); border-right:1px solid var(--border-soft);
+    display:flex; flex-direction:column;
+    transition:transform var(--transition), background var(--transition);
+  }
+  .sidebar .brand{
+    display:flex; align-items:center; gap:10px; padding:0 10px; margin-bottom:26px;
+    font-weight:800; font-size:14px; color:var(--text-dim);
+  }
+  .sidebar .brand .dot{ width:24px;height:24px;border-radius:7px;background:var(--grad); }
+  .nav-item{
+    display:flex; align-items:center; gap:11px; padding:11px 14px; margin-bottom:3px;
+    border-radius:var(--r-sm); font-size:13.5px; font-weight:600; color:var(--text-dim);
+    cursor:pointer; transition:background var(--transition), color var(--transition), transform var(--transition);
+    border:1px solid transparent;
+  }
+  .nav-item:hover{ background:var(--panel-strong); color:var(--text); transform:translateX(3px); }
+  .nav-item.active{
+    background:rgba(139,92,246,.12); color:#fff; border-color:rgba(139,92,246,.28);
+  }
+  .nav-item .ic{ width:18px; text-align:center; flex-shrink:0; }
+  .nav-spacer{ flex:1; }
+  .nav-divider{ height:1px; background:var(--border-soft); margin:10px 6px; }
+  .nav-item.danger{ color:var(--danger); }
+  .nav-item.danger:hover{ background:rgba(248,113,113,.1); }
+
+  .shell-main{ flex:1 1 auto; min-width:0; padding:30px 36px; }
+  .shell-page{
+    display:none; animation:fadeUp .3s var(--transition) both;
+  }
+  .shell-page.active{ display:block; }
+  .shell-page h1{ font-size:22px; font-weight:800; letter-spacing:-.02em; margin:0 0 4px; }
+  .shell-page .page-sub{ font-size:13px; color:var(--text-faint); margin:0 0 24px; }
+
+  /* Dashboard stats */
+  .stat-grid{
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:14px;
+  }
+  .stat-card{ padding:18px 18px 16px; position:relative; overflow:hidden; transition:transform var(--transition), box-shadow var(--transition); }
+  .stat-card:hover{ transform:translateY(-3px); box-shadow:0 12px 30px rgba(0,0,0,0.3); }
+  .stat-card .stat-label{
+    font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--text-faint); display:flex; align-items:center; gap:6px; margin-bottom:10px;
+  }
+  .stat-card .stat-value{ font-size:22px; font-weight:800; letter-spacing:-.02em; color:var(--text); }
+  .stat-card .stat-value.sm{ font-size:15px; }
+  .stat-card .stat-sub{ font-size:11.5px; color:var(--text-faint); margin-top:4px; }
+  .stat-card.wide{ grid-column: span 2; }
+  .stat-card.profile{ display:flex; align-items:center; gap:14px; }
+  .stat-card.profile img{ width:52px; height:52px; border-radius:12px; border:1px solid var(--border); }
+  .bar-track{ height:7px; border-radius:99px; background:rgba(255,255,255,.06); overflow:hidden; margin-top:8px; }
+  .bar-fill{ height:100%; border-radius:99px; transition:width .4s var(--transition); }
+  .bar-fill.health{ background:linear-gradient(90deg,#F87171,#FB923C); }
+  .bar-fill.hunger{ background:linear-gradient(90deg,#FBBF24,#FB923C); }
+  .bar-fill.xp{ background:var(--grad); }
+  .conn-status-row{ display:flex; align-items:center; gap:8px; }
+  .conn-status-row .dot-pill{ width:8px; height:8px; border-radius:50%; }
+
+  /* Server page */
+  .server-info-card{ padding:24px; margin-bottom:16px; }
+  .server-info-row{
+    display:flex; justify-content:space-between; align-items:center; gap:10px;
+    padding:13px 0; border-bottom:1px solid var(--border-soft); font-size:13px;
+  }
+  .server-info-row:last-child{ border-bottom:none; }
+  .server-info-row .label{ color:var(--text-faint); font-weight:600; }
+  .server-info-row .value{ font-weight:700; color:var(--text); }
+  .server-actions{ display:flex; gap:10px; margin-top:18px; flex-wrap: wrap; }
+  .server-actions .btn{ margin-bottom:0; flex: 1; }
+  .btn-reconnect{ background:var(--grad); color:#fff; box-shadow:0 8px 26px rgba(99,102,241,.35); }
+  .btn-disconnect{ background:rgba(248,113,113,.1); color:var(--danger); border:1px solid rgba(248,113,113,.28); }
+
+  /* Console */
+  .console-section{
+    flex:1 1 640px; max-width:720px; min-width:0; align-self:stretch;
+    padding:26px 24px; text-align:left; display:flex; flex-direction:column;
+  }
+  .console-section h3{ font-size:15px; font-weight:800; margin:0 0 14px; display:flex; align-items:center; gap:8px; }
+  .console-log{
+    flex:1 1 auto; height:min(64vh,620px); overflow-y:auto;
+    background:rgba(0,0,0,.28); border:1px solid var(--border); border-radius:var(--r-md);
+    padding:12px 14px; font-family:'SFMono-Regular',Consolas,monospace; font-size:12px; line-height:1.65;
+    display:flex; flex-direction:column; gap:2px;
+  }
+  .console-log .line{ word-break:break-word; white-space:pre-wrap; }
+  .console-log .line.sent{ color:#A78BFA; }
+  .console-log .line.auto{ color:#FB923C; }
+  .console-log .line.system{ color:var(--warn); font-style:italic; }
+  .console-log .line.game{ color:var(--text); }
+  .console-log .empty{ color:var(--text-faint); text-align:center; padding:8px 0; }
+  .console-log .ts{ color:var(--text-faint); margin-right:6px; }
+  .console-form{ display:flex; gap:8px; margin-top:12px; }
+  .console-form input{
+    flex:1; padding:11px 13px; background:rgba(0,0,0,.25); border:1px solid var(--border);
+    border-radius:var(--r-sm); color:var(--text); font-size:13px; font-family:'SFMono-Regular',Consolas,monospace;
+  }
+  .console-form input::placeholder{ color:var(--text-faint); }
+  .console-form .btn-send{
+    padding:11px 22px; background:var(--grad); color:#fff; border:none; border-radius:var(--r-sm);
+    cursor:pointer; font-weight:700; font-size:13px;
+  }
+  .console-form .btn-send:disabled{ opacity:.4; cursor:not-allowed; }
+
+  /* Commands page */
+  .cmd-run-row{ display:flex; gap:10px; margin-bottom:20px; }
+  .cmd-run-row input{
+    flex:1; padding:12px 14px; background:rgba(0,0,0,.25); border:1px solid var(--border);
+    border-radius:var(--r-sm); color:var(--text); font-size:13px; font-family:'SFMono-Regular',Consolas,monospace;
+  }
+  .cmd-run-row button{
+    padding:12px 24px; background:var(--grad); color:#fff; border:none; border-radius:var(--r-sm);
+    cursor:pointer; font-weight:700; font-size:13px; white-space:nowrap;
+  }
+  .cmd-run-row button:disabled{ opacity:.4; cursor:not-allowed; }
+  .quick-cmds{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:22px; }
+  .quick-cmd-btn{
+    padding:8px 14px; background:var(--panel-strong); border:1px solid var(--border);
+    border-radius:999px; color:var(--text-dim); font-size:12px; font-weight:700; cursor:pointer;
+    font-family:'SFMono-Regular',Consolas,monospace; transition:background var(--transition), color var(--transition);
+  }
+  .quick-cmd-btn:hover{ background:rgba(139,92,246,.14); color:#fff; }
+  .cmd-cols{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:760px){ .cmd-cols{ grid-template-columns:1fr; } }
+  .cmd-list-card{ padding:18px 18px 8px; }
+  .cmd-list-card h3{ font-size:13.5px; font-weight:800; margin:0 0 12px; display:flex; align-items:center; gap:6px; }
+  .cmd-list-item{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding:9px 4px; border-bottom:1px solid var(--border-soft); font-size:12.5px;
+  }
+  .cmd-list-item:last-child{ border-bottom:none; }
+  .cmd-list-item .cmd{ font-family:'SFMono-Regular',Consolas,monospace; color:#C4B5FD; }
+  .cmd-list-item .cmd-btns{ display:flex; gap:6px; flex-shrink:0; }
+  .cmd-list-item .cmd-btns button{
+    border:none; background:var(--panel-strong); color:var(--text-dim); border-radius:7px;
+    padding:4px 8px; font-size:11px; cursor:pointer;
+  }
+  .cmd-list-item .cmd-btns button:hover{ background:rgba(139,92,246,.18); color:#fff; }
+  .cmd-list-empty{ color:var(--text-faint); font-size:12.5px; text-align:center; padding:16px 0; }
+
+  /* Auto Commands */
+  .auto-add-card{ padding:20px; margin-bottom:18px; }
+  .auto-add-row{ display:flex; gap:10px; flex-wrap:wrap; }
+  .auto-add-row input, .auto-add-row select{
+    padding:11px 13px; background:rgba(0,0,0,.25); border:1px solid var(--border);
+    border-radius:var(--r-sm); color:var(--text); font-size:13px; font-family:inherit;
+  }
+  .auto-add-row input[name="cmd"]{ flex:2; min-width:180px; font-family:'SFMono-Regular',Consolas,monospace; }
+  .auto-add-row select{ flex:1; min-width:110px; cursor:pointer; }
+  .auto-add-row button{
+    padding:11px 22px; background:var(--grad); color:#fff; border:none; border-radius:var(--r-sm);
+    cursor:pointer; font-weight:700; font-size:13px;
+  }
+  .auto-list-card{ padding:8px; }
+  .auto-item{
+    display:flex; align-items:center; gap:14px; padding:14px 16px; margin:6px;
+    background:var(--panel-strong); border:1px solid var(--border); border-radius:var(--r-md);
+  }
+  .auto-item .cmd{ font-family:'SFMono-Regular',Consolas,monospace; color:#C4B5FD; font-weight:700; font-size:13px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .auto-item .interval-tag{
+    font-size:11px; color:var(--text-faint); font-weight:600; white-space:nowrap;
+    background:rgba(0,0,0,.2); padding:5px 10px; border-radius:999px;
+  }
+  .toggle{
+    width:38px; height:22px; border-radius:99px; background:rgba(255,255,255,.1);
+    position:relative; cursor:pointer; flex-shrink:0; border:1px solid var(--border);
+    transition:background var(--transition);
+  }
+  .toggle.on{ background:#34D399; border-color:#34D399; }
+  .toggle .knob{
+    position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%;
+    background:#fff; transition:transform var(--transition);
+  }
+  .toggle.on .knob{ transform:translateX(16px); }
+  .auto-item .del-btn{
+    border:none; background:rgba(248,113,113,.12); color:var(--danger); border-radius:8px;
+    padding:6px 12px; font-size:12px; font-weight:700; cursor:pointer; flex-shrink:0;
+  }
+  .auto-item .del-btn:hover{ background:rgba(248,113,113,.22); }
+  .auto-list-empty{ color:var(--text-faint); font-size:13px; text-align:center; padding:36px 0; }
+
+  /* Settings */
+  .settings-grid{
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:18px;
+  }
+  .settings-card{ padding:22px 20px; }
+  .settings-card h3{ font-size:14px; font-weight:800; margin:0 0 14px; display:flex; align-items:center; gap:8px; }
+  .setting-row{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:10px 0; border-bottom:1px solid var(--border-soft);
+  }
+  .setting-row:last-child{ border-bottom:none; }
+  .setting-row .label{ font-size:13px; color:var(--text-dim); }
+  .setting-row .control{ display:flex; align-items:center; gap:8px; }
+  .setting-row .control input[type="checkbox"]{
+    accent-color:var(--accent); width:18px; height:18px; cursor:pointer;
+  }
+  .setting-row .control select, .setting-row .control input[type="number"]{
+    background:rgba(0,0,0,.25); border:1px solid var(--border); border-radius:var(--r-sm);
+    padding:6px 10px; color:var(--text); font-size:12px; width:90px;
+  }
+  .setting-row .control input[type="color"]{
+    width:36px; height:36px; border:2px solid var(--border); border-radius:var(--r-sm);
+    background:transparent; cursor:pointer; padding:2px;
+  }
+  .setting-row .control .scale-label{ font-size:12px; color:var(--text-faint); min-width:30px; text-align:center; }
+
+  /* ── MODAL (join server) ── */
+  .modal-overlay{
+    display:none; position:fixed; inset:0; z-index:50;
+    background:rgba(6,7,12,.65); backdrop-filter:blur(4px);
+    align-items:center; justify-content:center; padding:20px;
+  }
+  .modal-overlay.open{ display:flex; }
+  .modal-box{
+    width:100%; max-width:400px; padding:30px 26px;
+    animation:fadeUp .3s var(--transition) both;
+  }
+  .modal-box h2{ font-size:18px; font-weight:800; margin:0 0 6px; letter-spacing:-.02em; }
+  .modal-box .modal-sub{ font-size:12.5px; color:var(--text-faint); margin:0 0 22px; }
+  .field{ text-align:left; margin-bottom:16px; }
+  .field label{ display:block; font-size:12px; font-weight:700; color:var(--text-dim); margin-bottom:7px; }
+  .field input, .field select{
+    width:100%; padding:11px 13px; border-radius:var(--r-sm);
+    background:rgba(0,0,0,.25); border:1px solid var(--border); color:var(--text);
+    font-size:13px; font-family:inherit;
+  }
+  .field select{ appearance:none; cursor:pointer; }
+  .modal-actions{ display:flex; gap:10px; margin-top:22px; }
+  .modal-actions .btn{ margin-bottom:0; }
+  .btn-cancel{ background:var(--panel-strong); color:var(--text); border:1px solid var(--border); }
+  .btn-connect{ background:var(--grad); color:#fff; box-shadow:0 8px 26px rgba(99,102,241,.35); }
+
+  /* ── AUTH OVERLAY ── */
+  #auth-overlay{
+    display:none; position:fixed; inset:0; z-index:60;
+    background:rgba(6,7,12,.8); backdrop-filter:blur(8px);
+    align-items:center; justify-content:center; padding:24px;
+  }
+  #auth-overlay.open{ display:flex; }
+  #auth-overlay .auth-box{
+    max-width:460px; width:100%; padding:40px 34px;
+    text-align:center;
+    animation:fadeUp .4s var(--transition) both;
+  }
+  #auth-overlay .auth-box .icon{ font-size:48px; margin-bottom:16px; display:block; }
+  #auth-overlay .auth-box h2{ font-size:22px; font-weight:800; margin:0 0 8px; letter-spacing:-.02em; }
+  #auth-overlay .auth-box p{ font-size:14px; color:var(--text-dim); line-height:1.7; margin:0 0 24px; }
+  #auth-overlay .auth-box .auth-actions { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; }
+  #auth-overlay .auth-box .btn-auth{
+    padding:14px 30px; background:var(--grad); color:#fff; border:none;
+    border-radius:var(--r-sm); font-size:15px; font-weight:700; cursor:pointer;
+    box-shadow:0 10px 30px rgba(99,102,241,0.3);
+    transition:transform var(--transition), box-shadow var(--transition);
+  }
+  #auth-overlay .auth-box .btn-auth:hover{ transform:translateY(-2px); box-shadow:0 14px 40px rgba(99,102,241,0.5); }
+  #auth-overlay .auth-box .btn-auth:disabled{ opacity:.5; cursor:not-allowed; }
+  #auth-overlay .auth-box .btn-cancel-auth {
+    padding:14px 30px; background:rgba(248,113,113,.1); color:var(--danger); border:1px solid rgba(248,113,113,.28);
+    border-radius:var(--r-sm); font-size:15px; font-weight:700; cursor:pointer;
+  }
+  #auth-overlay .auth-box .auth-status{ font-size:13px; color:var(--warn); margin-top:12px; }
+
+  @media (max-width:760px){
+    .sidebar{ flex:0 0 auto; width:100%; min-height:auto; flex-direction:row; overflow-x:auto; }
+    .sidebar .brand{ display:none; }
+    .nav-item{ flex-direction:column; gap:4px; font-size:10.5px; padding:9px 12px; white-space:nowrap; }
+    .nav-spacer{ display:none; }
+    #shell{ flex-direction:column; }
+    .shell-main{ padding:20px; }
+    .settings-grid{ grid-template-columns:1fr; }
+  }
+</style>
 </head>
-<body>
-<div class="layout">
-  <!-- Live Console (left, large) -->
-  <div id="console-section" class="console-section" style="display:none">
-    <h3>🖥️ Live Console</h3>
-    <div id="console-log" class="console-log"><div class="empty">Waiting for activity…</div></div>
-    <div class="console-form">
-      <input id="console-input" placeholder="Type a chat message or /command and press Enter" />
-      <button id="console-send" class="btn-send" onclick="sendConsole()">Send</button>
-    </div>
+<body class="view-login">
+
+<!-- Toast -->
+<div id="toast-container"></div>
+
+<!-- ═══ HERO (landing) ═══ -->
+<div id="hero-view">
+  <div class="hero-logo">🎮</div>
+  <h1 class="hero-title">Aura AFK</h1>
+  <p class="hero-sub">Minecraft AFK Dashboard</p>
+  <p class="hero-desc">Securely manage your Minecraft account from anywhere.</p>
+  <button id="btn-login-hero" class="btn-ms" onclick="startLogin()">
+    <svg viewBox="0 0 23 23" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1" y="1" width="10" height="10" fill="#F35325"/>
+      <rect x="12" y="1" width="10" height="10" fill="#81BC06"/>
+      <rect x="1" y="12" width="10" height="10" fill="#05A6F0"/>
+      <rect x="12" y="12" width="10" height="10" fill="#FFBA08"/>
+    </svg>
+    Login with Microsoft
+  </button>
+  <div class="hero-checks">
+    <span><span class="tick">✓</span> Secure Login</span>
+    <span><span class="tick">✓</span> Account Saved</span>
+    <span><span class="tick">✓</span> One Click Login</span>
   </div>
+</div>
 
-  <div class="mc-card">
-  <div class="icon">🎮</div>
-  <h1>Link Your Minecraft Account</h1>
-  <p class="sub">Link your own Microsoft account to DonutSMP. This is tied to your Discord account only — nobody else can see or control it. No passwords stored, only a secure session token.</p>
-
-  <div id="badge" class="badge disconnected">
-    <span class="dot"></span>
-    <span id="badge-text">Checking…</span>
-  </div>
-
-  <div id="mc-username" style="display:none; color:#8b95a1; font-size:13px; margin-bottom:20px;"></div>
-
-  <div id="code-box" class="code-box" style="display:none">
+<!-- ═══ MS AUTH VIEW ═══ -->
+<div id="ms-auth-view" class="glass" style="padding: 30px;">
+  <h2 style="margin-top: 0;">Authentication Required</h2>
+  <div id="code-box" class="code-box">
     <p>Go to the link below and enter this code to sign in with Microsoft:</p>
     <div id="device-code" class="code">------</div>
     <a id="device-url" href="https://microsoft.com/devicelogin" target="_blank" rel="noopener">
       Open microsoft.com/devicelogin ↗
     </a>
   </div>
-
   <div id="discord-box" class="discord-box" style="display:none">
     <p>
-      🔔 DonutSMP sent you a <strong>Discord DM</strong> asking to authorize this login.<br><br>
+      🔔 The server sent you a <strong>Discord DM</strong> asking to authorize this login.<br><br>
       Check your DMs, click <strong>Authorize</strong>, then click the button below.
     </p>
-    <button class="btn btn-authorized" onclick="iAuthorized()">✅ I Authorized</button>
+    <button class="btn btn-authorized" style="background:linear-gradient(135deg,#7C3AED,#6D28D9); color:#fff;" onclick="iAuthorized()">✅ I Authorized</button>
   </div>
+  <div id="ms-auth-error" style="display:none; margin-top:12px; padding:10px; border-radius:var(--r-sm); background:rgba(248,113,113,0.1); border:1px solid rgba(248,113,113,0.2); color:var(--danger); font-size:13px; font-weight:600;"></div>
+</div>
 
-  <button id="btn-login"   class="btn btn-login"   onclick="startLogin()">🔗 Link My Account</button>
-  <button id="btn-leave"   class="btn btn-leave"   onclick="leaveServer()" style="display:none">Leave Server</button>
-  <button id="btn-signout" class="btn btn-signout" onclick="fullLogout()"  style="display:none">Unlink (clear token)</button>
+<!-- ═══ ACCOUNT VIEW ═══ -->
+<div id="account-view" class="glass">
+  <img id="acct-avatar" class="acct-avatar" src="https://minotar.net/avatar/MHF_Steve/100" alt="" />
+  <h1 id="acct-username" class="acct-username">—</h1>
+  <p class="acct-sub">Your Aura AFK linked account</p>
+  <div class="acct-row">
+    <span class="label">Minecraft Username</span>
+    <span id="acct-mc-name" class="value">—</span>
+  </div>
+  <div class="acct-row">
+    <span class="label">Microsoft Account</span>
+    <span class="value ok">✓ Linked</span>
+  </div>
+  <div class="acct-row">
+    <span class="label">Java Edition</span>
+    <span id="acct-java" class="value ok">✅ Owned</span>
+  </div>
+  <div class="acct-actions">
+    <button class="btn btn-join" onclick="openJoinModal()">🌐 Join Server</button>
+    <button class="btn btn-logout" onclick="fullLogout()">🚪 Logout</button>
+  </div>
+</div>
 
-  <!-- Schedule Section -->
-  <div id="schedule-section" class="schedule-section" style="display:none">
-    <h3>⏰ Scheduled Commands</h3>
-    <div id="schedule-list"><div class="schedule-empty">Loading...</div></div>
-    
-    <div class="schedule-form">
-      <input id="schedule-cmd" placeholder="Command (e.g., /home 2)" />
-      <input id="schedule-interval" placeholder="Interval (e.g., 30m, 1h)" style="flex:0.5;min-width:80px" />
-      <button class="btn-add" onclick="addSchedule()">+ Add</button>
+<!-- ═══ JOIN SERVER MODAL ═══ -->
+<div id="join-modal-overlay" class="modal-overlay">
+  <div class="modal-box glass">
+    <h2>Join Server</h2>
+    <p class="modal-sub">Connect your linked account to a Minecraft server.</p>
+    <div class="field">
+      <label for="join-ip">Server IP</label>
+      <input id="join-ip" type="text" placeholder="play.example.net" />
+    </div>
+    <div class="field">
+      <label for="join-version">Version</label>
+      <select id="join-version">
+        <option value="latest" selected>Latest (Auto)</option>
+        <option value="1.21.4">1.21.4</option>
+        <option value="1.20.4">1.20.4</option>
+        <option value="1.19.4">1.19.4</option>
+        <option value="1.18.2">1.18.2</option>
+        <option value="1.16.5">1.16.5</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-cancel" onclick="closeJoinModal()">Cancel</button>
+      <button class="btn btn-connect" onclick="confirmJoin()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ CONNECTING SCREEN ═══ -->
+<div id="connecting-view" class="glass">
+  <div class="conn-icon">🎮</div>
+  <h2>Connecting to server…</h2>
+  <div id="conn-steps" class="conn-steps">
+    <div class="conn-step" data-step="resolve"><span class="mark">○</span> Resolving server</div>
+    <div class="conn-step" data-step="auth"><span class="mark">○</span> Authenticating Microsoft</div>
+    <div class="conn-step" data-step="login"><span class="mark">○</span> Logging in</div>
+    <div class="conn-step" data-step="world"><span class="mark">○</span> Joining world</div>
+    <div class="conn-step" data-step="done"><span class="mark">○</span> Connected</div>
+  </div>
+  <div class="conn-progress"><div id="conn-progress-bar" class="conn-progress-bar"></div></div>
+</div>
+
+<!-- ═══ AUTHENTICATION REQUIRED OVERLAY ═══ -->
+<div id="auth-overlay">
+  <div class="auth-box glass">
+    <span class="icon">🔒</span>
+    <h2>Discord Authentication Required</h2>
+    <p id="auth-message">This server requires Discord verification before your account can join.<br><br>Please complete the verification process in Discord.</p>
+    <div class="auth-actions">
+      <button id="auth-retry-btn" class="btn-auth" onclick="retryConnect()">✅ I've Authenticated</button>
+      <button id="auth-cancel-btn" class="btn-cancel-auth" onclick="cancelConnection()">❌ Cancel Connection</button>
+    </div>
+    <div id="auth-status" class="auth-status" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- ═══ APP SHELL (post‑connect) ═══ -->
+<div id="shell">
+  <div class="sidebar">
+    <div class="brand"><span class="dot"></span> Aura AFK</div>
+    <div class="nav-item active" data-page="dashboard" onclick="switchPage('dashboard')">
+      <span class="ic">🏠</span> Dashboard
+    </div>
+    <div class="nav-item" data-page="server" onclick="switchPage('server')">
+      <span class="ic">🌐</span> Server
+    </div>
+    <div class="nav-item" data-page="console" onclick="switchPage('console')">
+      <span class="ic">💻</span> Console
+    </div>
+    <div class="nav-item" data-page="commands" onclick="switchPage('commands')">
+      <span class="ic">⚡</span> Commands
+    </div>
+    <div class="nav-item" data-page="autocommands" onclick="switchPage('autocommands')">
+      <span class="ic">🔁</span> Auto Commands
+    </div>
+    <div class="nav-item" data-page="settings" onclick="switchPage('settings')">
+      <span class="ic">⚙</span> Settings
+    </div>
+    <div class="nav-item" data-page="plan" onclick="switchPage('plan')">
+      <span class="ic">💎</span> Plan
+    </div>
+    <div class="nav-spacer"></div>
+    <div class="nav-divider"></div>
+    <div class="nav-item danger" onclick="disconnectServer()">
+      <span class="ic">🚪</span> Disconnect
     </div>
   </div>
 
-  <p class="hint">
-    <strong>Link My Account</strong> — signs in with your own Microsoft account and keeps you connected.<br>
-    <strong>Leave Server</strong> — disconnects but keeps your link saved, reconnects automatically.<br>
-    <strong>Unlink</strong> — fully clears your token and requires a new Microsoft login next time.<br><br>
-    You can also do all of this from Discord with <code>/link</code>, <code>/mcstatus</code>, and <code>/unlink</code>.
-  </p>
-</div>
+  <div class="shell-main">
+    <!-- Dashboard -->
+    <div class="shell-page active" data-page="dashboard">
+      <h1>Dashboard</h1>
+      <p class="page-sub">Overview of your Aura AFK session. Updates live.</p>
+      <div class="stat-grid">
+        <div class="stat-card glass profile">
+          <img id="dash-avatar" src="https://minotar.net/avatar/MHF_Steve/100" alt="" />
+          <div>
+            <div class="stat-label">Minecraft Username</div>
+            <div id="dash-username" class="stat-value sm">—</div>
+          </div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">🔌 Connection</div>
+          <div class="conn-status-row">
+            <span id="dash-conn-dot" class="dot-pill" style="background:var(--text-faint)"></span>
+            <span id="dash-conn-status" class="stat-value sm">Disconnected</span>
+          </div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">🌐 Current Server</div>
+          <div id="dash-server" class="stat-value sm">—</div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">📶 Ping</div>
+          <div id="dash-ping" class="stat-value">— <span class="stat-sub">ms</span></div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">📍 Coordinates</div>
+          <div id="dash-coords" class="stat-value sm">—</div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">🖥️ TPS</div>
+          <div id="dash-tps" class="stat-value">—</div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">⏱️ Online Time</div>
+          <div id="dash-online" class="stat-value sm">—</div>
+        </div>
+        <div class="stat-card glass wide">
+          <div class="stat-label">❤️ Health</div>
+          <div id="dash-health-text" class="stat-value sm">—</div>
+          <div class="bar-track"><div id="dash-health-bar" class="bar-fill health" style="width:0%"></div></div>
+        </div>
+        <div class="stat-card glass wide">
+          <div class="stat-label">🍗 Hunger</div>
+          <div id="dash-hunger-text" class="stat-value sm">—</div>
+          <div class="bar-track"><div id="dash-hunger-bar" class="bar-fill hunger" style="width:0%"></div></div>
+        </div>
+        <div class="stat-card glass">
+          <div class="stat-label">🛡️ Armor</div>
+          <div id="dash-armor" class="stat-value">—</div>
+        </div>
+        <div class="stat-card glass wide">
+          <div class="stat-label">✨ Experience</div>
+          <div id="dash-xp-text" class="stat-value sm">—</div>
+          <div class="bar-track"><div id="dash-xp-bar" class="bar-fill xp" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Server -->
+    <div class="shell-page" data-page="server">
+      <h1>Server</h1>
+      <p class="page-sub">Connection details and server info.</p>
+      <div class="server-info-card glass">
+        <div class="server-info-row"><span class="label">Server IP</span><span id="srv-ip" class="value">—</span></div>
+        <div class="server-info-row"><span class="label">Version</span><span id="srv-version" class="value">—</span></div>
+        <div class="server-info-row"><span class="label">Ping</span><span id="srv-ping" class="value">—</span></div>
+        <div class="server-info-row">
+          <span class="label">Connection Status</span>
+          <span id="srv-status" class="conn-status-row value">
+            <span id="srv-status-dot" class="dot-pill" style="background:var(--text-faint)"></span>
+            <span id="srv-status-text">Disconnected</span>
+          </span>
+        </div>
+        <div class="server-actions">
+          <button id="srv-reconnect" class="btn btn-reconnect" onclick="serverReconnect()">🔄 Reconnect</button>
+          <button id="srv-disconnect" class="btn btn-disconnect" onclick="serverDisconnect()">🚪 Disconnect</button>
+          <button id="srv-join" class="btn btn-join" onclick="openJoinModal()">🌐 Join Server</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Console -->
+    <div class="shell-page" data-page="console">
+      <h1>Console</h1>
+      <p class="page-sub">Live game console and chat.</p>
+      <div id="shell-console-section" class="console-section glass" style="padding:22px;">
+        <div id="shell-console-log" class="console-log"><div class="empty">Waiting for activity…</div></div>
+        <div class="console-form">
+          <input id="shell-console-input" placeholder="Type a chat message or /command and press Enter" />
+          <button id="shell-console-send" class="btn-send" onclick="sendShellConsole()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Commands -->
+    <div class="shell-page" data-page="commands">
+      <h1>Commands</h1>
+      <p class="page-sub">Run in-game commands manually.</p>
+      <div class="cmd-run-row">
+        <input id="cmd-input" placeholder="/home 2, /sethome, /tpa Player, ..." />
+        <button id="cmd-execute" onclick="executeCommand()">Execute</button>
+      </div>
+      <div class="quick-cmds" id="quick-cmds"></div>
+      <div class="cmd-cols">
+        <div class="cmd-list-card glass">
+          <h3>🕘 Recent Commands</h3>
+          <div id="recent-cmds-list"><div class="cmd-list-empty">No commands run yet.</div></div>
+        </div>
+        <div class="cmd-list-card glass">
+          <h3>⭐ Favorite Commands</h3>
+          <div id="fav-cmds-list"><div class="cmd-list-empty">No favorites yet. Star a recent command to add it.</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Auto Commands -->
+    <div class="shell-page" data-page="autocommands">
+      <h1>Auto Commands</h1>
+      <p class="page-sub">Scheduled commands that run automatically on a set interval — add as many as you like.</p>
+      <div class="auto-add-card glass">
+        <div class="auto-add-row">
+          <input name="cmd" id="auto-cmd" placeholder="Command (e.g. /home 2)" />
+          <input id="auto-interval-value" type="number" min="1" value="30" style="width:80px" />
+          <select id="auto-interval-unit">
+            <option value="s">Seconds</option>
+            <option value="m" selected>Minutes</option>
+            <option value="h">Hours</option>
+            <option value="d">Days</option>
+          </select>
+          <button onclick="addAutoCommand()">+ Add Scheduled Command</button>
+        </div>
+      </div>
+      <div class="auto-list-card glass">
+        <div id="auto-cmds-list"><div class="auto-list-empty">Loading scheduled commands…</div></div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="shell-page" data-page="settings">
+      <h1>Settings</h1>
+      <p class="page-sub">Manage your Aura AFK preferences.</p>
+      <div class="settings-grid">
+        <!-- Account -->
+        <div class="settings-card glass">
+          <h3>👤 Account</h3>
+          <div class="setting-row">
+            <span class="label">Minecraft Username</span>
+            <span id="settings-mc-name" class="value" style="font-weight:700;">—</span>
+          </div>
+          <div class="setting-row">
+            <span class="label">Microsoft Account</span>
+            <span class="value ok" style="color:var(--ok);">✓ Linked</span>
+          </div>
+          <div class="setting-row">
+            <span class="label">Java Edition</span>
+            <span id="settings-java" class="value ok" style="color:var(--ok);">✅ Owned</span>
+          </div>
+          <div class="setting-row" style="border-bottom:none; padding-top:12px;">
+            <button class="btn btn-logout" onclick="fullLogout()" style="margin:0; width:auto; padding:8px 18px;">Logout</button>
+          </div>
+        </div>
+
+        <!-- Appearance -->
+        <div class="settings-card glass">
+          <h3>🎨 Appearance</h3>
+          <div class="setting-row">
+            <span class="label">Dark Theme</span>
+            <div class="control">
+              <input type="checkbox" id="setting-dark-theme" checked disabled />
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="label">Accent Color</span>
+            <div class="control">
+              <input type="color" id="setting-accent" value="#8B5CF6" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="label">UI Scale</span>
+            <div class="control">
+              <input type="range" id="setting-scale" min="0.8" max="1.4" step="0.05" value="1" style="width:80px;" />
+              <span class="scale-label" id="scale-label">1.0</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Notifications -->
+        <div class="settings-card glass">
+          <h3>🔔 Notifications</h3>
+          <div class="setting-row">
+            <span class="label">Desktop Notifications</span>
+            <div class="control">
+              <input type="checkbox" id="setting-desktop-notif" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="label">Connection Alerts</span>
+            <div class="control">
+              <input type="checkbox" id="setting-conn-alerts" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <span class="label">Error Notifications</span>
+            <div class="control">
+              <input type="checkbox" id="setting-error-notif" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:20px; display:flex; gap:10px;">
+        <button class="btn" style="width:auto; padding:10px 28px; background:var(--grad); color:#fff; border:none; border-radius:var(--r-sm); font-weight:700; cursor:pointer;" onclick="saveSettings()">💾 Save Settings</button>
+        <button class="btn" style="width:auto; padding:10px 28px; background:var(--panel-strong); color:var(--text); border:1px solid var(--border); border-radius:var(--r-sm); font-weight:700; cursor:pointer;" onclick="loadSettings()">🔄 Reset</button>
+      </div>
+    </div>
+
+    <!-- Plan -->
+    <div class="shell-page" data-page="plan">
+      <h1>Plan</h1>
+      <p class="page-sub">Your current AFK plan and today's usage.</p>
+
+      <div class="stat-grid">
+        <div class="stat-card glass wide">
+          <div class="stat-label">Current Plan</div>
+          <div id="plan-current" class="stat-value sm">—</div>
+        </div>
+        <div class="stat-card glass wide">
+          <div class="stat-label">⚡ Commands Today</div>
+          <div id="plan-cmd-text" class="stat-value sm">— / —</div>
+          <div class="bar-track"><div id="plan-cmd-bar" class="bar-fill xp" style="width:0%"></div></div>
+        </div>
+        <div class="stat-card glass wide">
+          <div class="stat-label">🔁 Active Auto Commands</div>
+          <div id="plan-auto-text" class="stat-value sm">— / —</div>
+          <div class="bar-track"><div id="plan-auto-bar" class="bar-fill hunger" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <div class="settings-grid" style="margin-top:24px;">
+        <div class="settings-card glass" id="plan-card-free">
+          <h3>🆓 Free</h3>
+          <div class="setting-row"><span class="label">Commands / day</span><span class="value">50</span></div>
+          <div class="setting-row"><span class="label">Auto commands</span><span class="value">1</span></div>
+          <div class="setting-row" style="border-bottom:none; padding-top:12px;">
+            <span id="plan-free-tag" class="value" style="font-weight:700; color:var(--ok);">✓ Your current plan</span>
+          </div>
+        </div>
+
+        <div class="settings-card glass" style="position:relative; overflow:hidden;">
+          <div style="filter:blur(4px); opacity:.55; pointer-events:none; user-select:none;">
+            <h3>⚡ Pro</h3>
+            <div class="setting-row"><span class="label">Commands / day</span><span class="value">500</span></div>
+            <div class="setting-row"><span class="label">Auto commands</span><span class="value">5</span></div>
+            <div class="setting-row" style="border-bottom:none; padding-top:12px;">
+              <button class="btn" style="width:auto; padding:8px 18px;">Upgrade</button>
+            </div>
+          </div>
+          <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; letter-spacing:.06em; text-transform:uppercase; font-size:13px; color:var(--text); background:rgba(8,11,18,.35);">Coming Soon</div>
+        </div>
+
+        <div class="settings-card glass" style="position:relative; overflow:hidden;">
+          <div style="filter:blur(4px); opacity:.55; pointer-events:none; user-select:none;">
+            <h3>👑 Elite</h3>
+            <div class="setting-row"><span class="label">Commands / day</span><span class="value">5000</span></div>
+            <div class="setting-row"><span class="label">Auto commands</span><span class="value">25</span></div>
+            <div class="setting-row" style="border-bottom:none; padding-top:12px;">
+              <button class="btn" style="width:auto; padding:8px 18px;">Upgrade</button>
+            </div>
+          </div>
+          <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; letter-spacing:.06em; text-transform:uppercase; font-size:13px; color:var(--text); background:rgba(8,11,18,.35);">Coming Soon</div>
+        </div>
+      </div>
+
+      <p style="margin-top:16px; font-size:12.5px; color:var(--text-faint, var(--text-muted));">Pro and Elite plans aren't purchasable yet — we'll announce it in Discord when checkout goes live. Everyone is on Free for now with no card required.</p>
+    </div>
+  </div>
+
 </div>
 
 <script>
+  // ── State ──────────────────────────────────────────────────────────────
   let currentDiscordId = null;
+  let clientView = 'login';
+  let lastShownLoginError = null;
+  let lastStatus = null;
+  let shellConsoleAfterId = 0;
+  let shellConsoleTimer = null;
+  let settingsCache = {};
 
+  // For auth retry
+  let pendingServer = null;
+  let pendingVersion = 'latest';
+
+  // ── Toast ──────────────────────────────────────────────────────────────
+  function showToast(message, type = 'info', duration = 4000) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+    toast.innerHTML = `<span class="icon">${icons[type] || 'ℹ️'}</span><span class="msg">${message}</span>`;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateX(30px)';
+      setTimeout(() => toast.remove(), 300);
+    }, duration);
+  }
+
+  // ── Fetch status ──────────────────────────────────────────────────────
   async function fetchStatus() {
     try {
-      const r = await fetch('/mc-status')
-      return await r.json()
+      const r = await fetch('/mc-status');
+      return await r.json();
     } catch {
-      return { status: 'error', error: 'Dashboard cannot reach MC bot' }
+      return { status: 'error', error: 'Dashboard cannot reach MC bot' };
     }
   }
 
+  // ── Apply status ──────────────────────────────────────────────────────
   function applyStatus(s) {
-    const badge      = document.getElementById('badge')
-    const badgeTxt   = document.getElementById('badge-text')
-    const dot        = badge.querySelector('.dot')
-    const codeBox    = document.getElementById('code-box')
-    const discordBox = document.getElementById('discord-box')
-    const btnLogin   = document.getElementById('btn-login')
-    const btnLeave   = document.getElementById('btn-leave')
-    const btnSignout = document.getElementById('btn-signout')
-    const mcUsername = document.getElementById('mc-username')
-    const scheduleSection = document.getElementById('schedule-section')
-    const consoleSection  = document.getElementById('console-section')
+    document.body.className = 'status-' + (s.status || 'disconnected');
+    renderDashboard(s);
+    renderServerPage(s);
 
-    // Reset everything
-    badge.className        = 'badge'
-    dot.classList.remove('pulse')
-    codeBox.style.display    = 'none'
-    discordBox.style.display = 'none'
-    btnLogin.style.display   = 'block'
-    btnLogin.disabled        = false
-    btnLeave.style.display   = 'none'
-    btnSignout.style.display = 'none'
-    mcUsername.style.display = 'none'
-    scheduleSection.style.display = 'none'
-    consoleSection.style.display = 'none'
-    if (s.status !== 'ready') stopConsolePolling()
-
+    // Core state machine for handling views
     if (s.status === 'ready') {
-      badge.classList.add('ready')
-      badgeTxt.textContent     = '● Connected'
-      btnLogin.style.display   = 'none'
-      btnLeave.style.display   = 'block'
-      btnSignout.style.display = 'block'
-      if (s.mcUsername) {
-        mcUsername.textContent   = `Playing as ${s.mcUsername}`
-        mcUsername.style.display = 'block'
+      if (currentDiscordId == null && s.discordId) currentDiscordId = s.discordId;
+
+      if (s.server) {
+        // State 4A: In game
+        if (clientView !== 'app') {
+          clientView = 'app';
+          renderClientView();
+          startShellConsolePolling();
+        }
+      } else {
+        // State 1: Logged in, idle (Account Page)
+        if (clientView !== 'account') {
+          clientView = 'account';
+          renderClientView();
+          populateAccountView(s);
+        }
       }
-      // Show schedule section when connected
-      if (s.discordId) {
-        currentDiscordId = s.discordId
-        scheduleSection.style.display = 'block'
-        loadSchedule()
-      }
-      // Show live console when connected
-      consoleSection.style.display = 'block'
-      startConsolePolling()
-
-    } else if (s.status === 'awaiting_auth') {
-      badge.classList.add('awaiting_auth')
-      badgeTxt.textContent  = 'Waiting for Microsoft login…'
-      dot.classList.add('pulse')
-      codeBox.style.display = 'block'
-      document.getElementById('device-code').textContent = s.code || '------'
-      document.getElementById('device-url').href = s.url || 'https://microsoft.com/devicelogin'
-      btnLogin.disabled = true
-
-    } else if (s.status === 'awaiting_discord_auth') {
-      badge.classList.add('awaiting_discord_auth')
-      badgeTxt.textContent     = 'Waiting for Discord auth…'
-      dot.classList.add('pulse')
-      discordBox.style.display = 'block'
-      btnLogin.disabled        = true
-
     } else if (s.status === 'connecting') {
-      badge.classList.add('connecting')
-      badgeTxt.textContent = 'Connecting…'
-      dot.classList.add('pulse')
-      btnLogin.disabled = true
+      // State 3: Connecting
+      // The view is already set to 'connecting' by joinServer()
+    } else if (s.status === 'idle') {
+      // Logged in (Microsoft account linked) but not connected to a server.
+      if (currentDiscordId == null && s.discordId) currentDiscordId = s.discordId;
+      if (clientView !== 'account') {
+        clientView = 'account';
+        renderClientView();
+      }
+      populateAccountView(s);
+    } else if (s.status === 'error' || s.status === 'disconnected') {
+      // Check if we have a code → stay in ms-auth
+      if (s.code) {
+        if (clientView !== 'ms-auth') {
+          clientView = 'ms-auth';
+          renderClientView();
+        }
+        // Update code display and error message
+        document.getElementById('code-box').style.display = 'block';
+        document.getElementById('discord-box').style.display = 'none';
+        document.getElementById('device-code').textContent = s.code || '------';
+        document.getElementById('device-url').href = s.url || 'https://microsoft.com/devicelogin';
+        // Show error if present
+        const errorEl = document.getElementById('ms-auth-error');
+        if (errorEl) {
+          if (s.error) {
+            errorEl.textContent = '⚠️ ' + s.error;
+            errorEl.style.display = 'block';
+          } else {
+            errorEl.style.display = 'none';
+          }
+        }
+        return;
+      }
 
-    } else if (s.status === 'error') {
-      badge.classList.add('error')
-      badgeTxt.textContent = `Error: ${s.error || 'unknown'}`
+      if (!s.mcUsername) {
+        // Truly unlinked – show login
+        if (clientView !== 'login' && clientView !== 'ms-auth') {
+          clientView = 'login';
+          renderClientView();
+        }
+        const heroBtn = document.getElementById('btn-login-hero');
+        if (heroBtn) heroBtn.disabled = false;
+        if (s.error && s.error !== lastShownLoginError) {
+          lastShownLoginError = s.error;
+          showToast(s.error, 'error');
+        }
+      } else {
+        // Logged in but disconnected/kicked from server.
+        if (clientView === 'app' || clientView === 'connecting') {
+          clientView = 'account';
+          renderClientView();
+        }
+      }
+    } else if (s.status === 'awaiting_discord_auth') {
+      // Server wants Discord DM verification before letting the bot in
+      // (e.g. Donut SMP-style Discord-linking anti-bot systems).
+      if (clientView !== 'ms-auth') {
+        clientView = 'ms-auth';
+        renderClientView();
+      }
+      document.getElementById('code-box').style.display = 'none';
+      document.getElementById('discord-box').style.display = 'block';
+      const errorEl = document.getElementById('ms-auth-error');
+      if (errorEl) {
+        if (s.error) {
+          errorEl.textContent = '⚠️ ' + s.error;
+          errorEl.style.display = 'block';
+        } else {
+          errorEl.style.display = 'none';
+        }
+      }
+    } else { // awaiting_auth, or any status with a Microsoft code
+      if (s.code) {
+        // Show ms-auth with the code and maybe error
+        if (clientView !== 'ms-auth') {
+          clientView = 'ms-auth';
+          renderClientView();
+        }
+        document.getElementById('code-box').style.display = 'block';
+        document.getElementById('discord-box').style.display = 'none';
+        document.getElementById('device-code').textContent = s.code || '------';
+        document.getElementById('device-url').href = s.url || 'https://microsoft.com/devicelogin';
+        const errorEl = document.getElementById('ms-auth-error');
+        if (errorEl) {
+          if (s.error) {
+            errorEl.textContent = '⚠️ ' + s.error;
+            errorEl.style.display = 'block';
+          } else {
+            errorEl.style.display = 'none';
+          }
+        }
+      } else {
+        // No code – fallback to login
+        if (clientView !== 'login') {
+          clientView = 'login';
+          renderClientView();
+        }
+      }
+    }
 
+    renderClientView();
+  }
+
+  function renderClientView() {
+    document.body.className = document.body.className
+      .split(' ')
+      .filter(c => !c.startsWith('view-'))
+      .join(' ');
+    if (clientView === 'login') document.body.classList.add('view-login');
+    if (clientView === 'ms-auth') document.body.classList.add('view-ms-auth');
+    if (clientView === 'account') document.body.classList.add('view-account');
+    if (clientView === 'connecting') document.body.classList.add('view-connecting');
+    if (clientView === 'app') document.body.classList.add('view-app');
+  }
+
+  function populateAccountView(s) {
+    const mcName = s.mcUsername || 'Unknown';
+    document.getElementById('acct-username').textContent = mcName;
+    document.getElementById('acct-mc-name').textContent = mcName;
+    document.getElementById('acct-avatar').src = s.mcUsername
+      ? `https://minotar.net/avatar/${encodeURIComponent(s.mcUsername)}/100`
+      : 'https://minotar.net/avatar/MHF_Steve/100';
+    const javaEl = document.getElementById('acct-java');
+    const ownsJava = !!s.ownsJava;
+    if (ownsJava) {
+      javaEl.textContent = '✅ Java Edition Owned';
+      javaEl.className = 'value ok';
     } else {
-      badge.classList.add('disconnected')
-      badgeTxt.textContent = 'Disconnected'
+      javaEl.textContent = '❌ Not Owned';
+      javaEl.className = 'value bad';
     }
   }
 
-  async function poll() { 
-    const status = await fetchStatus()
-    applyStatus(status) 
-  }
-
+  // ── Login actions ──────────────────────────────────────────────────────
   async function startLogin() {
-    document.getElementById('btn-login').disabled = true
-    await fetch('/mc-start-login', { method: 'POST' })
-    setTimeout(poll, 1500)
+    const heroBtn = document.getElementById('btn-login-hero');
+    if (heroBtn) heroBtn.disabled = true;
+    try {
+      const r = await fetch('/mc-start-login', { method: 'POST' });
+      const data = await r.json();
+      if (!data.ok) {
+        showToast(data.error || 'Login start failed', 'error');
+        if (heroBtn) heroBtn.disabled = false;
+        return;
+      }
+      showToast('Microsoft login initiated. Check the code below.', 'info');
+    } catch (e) {
+      showToast('Network error starting login', 'error');
+      if (heroBtn) heroBtn.disabled = false;
+      return;
+    }
+    setTimeout(poll, 1500);
   }
 
   async function iAuthorized() {
-    await fetch('/mc-reconnect', { method: 'POST' })
-    setTimeout(poll, 500)
-  }
-
-  async function leaveServer() {
-    await fetch('/mc-logout', { method: 'POST' })
-    setTimeout(poll, 500)
+    try {
+      await fetch('/mc-reconnect', { method: 'POST' });
+      showToast('Discord authorization confirmed. Connecting…', 'success');
+    } catch (e) {
+      showToast('Error confirming authorization', 'error');
+    }
+    setTimeout(poll, 500);
   }
 
   async function fullLogout() {
-    if (!confirm('This unlinks your Minecraft account and requires a full Microsoft login next time. Continue?')) return
-    await fetch('/mc-full-logout', { method: 'POST' })
-    setTimeout(poll, 500)
+    if (!confirm('This unlinks your Minecraft account and requires a full Microsoft login next time. Continue?')) return;
+    try {
+      await fetch('/mc-full-logout', { method: 'POST' });
+      showToast('Account unlinked.', 'success');
+    } catch (e) {
+      showToast('Error unlinking', 'error');
+    }
+    setTimeout(poll, 500);
   }
 
-  // ── Schedule Management ────────────────────────────────────────────────────
+  // ── Join Server modal ────────────────────────────────────────────────
+  function openJoinModal() {
+    document.getElementById('join-modal-overlay').classList.add('open');
+  }
+  function closeJoinModal() {
+    document.getElementById('join-modal-overlay').classList.remove('open');
+  }
 
-  async function loadSchedule() {
-    if (!currentDiscordId) return
+  async function confirmJoin() {
+    const ip = document.getElementById('join-ip').value.trim();
+    if (!ip) {
+      showToast('Please enter a server IP.', 'warning');
+      return;
+    }
+    const version = document.getElementById('join-version').value;
+    closeJoinModal();
+    await joinServer(ip, version);
+  }
+
+  // ── Core join logic ──────────────────────────────────────────────────
+  async function joinServer(ip, version) {
+    pendingServer = ip;
+    pendingVersion = version;
+
+    // State 3: Connecting
+    clientView = 'connecting';
+    renderClientView();
+    runConnectingSequence();
+
     try {
-      const r = await fetch('/mc-schedule/' + currentDiscordId)
-      const data = await r.json()
-      if (data.ok) {
-        renderSchedule(data.commands || [])
+      const r = await fetch('/mc-connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server: ip, version })
+      });
+      const data = await r.json();
+
+      // Check if authentication is required
+      if (data.requires_auth === true) {
+        // State 4B: Auth Required
+        document.getElementById('auth-overlay').classList.add('open');
+        document.getElementById('auth-status').style.display = 'none';
+        document.getElementById('auth-retry-btn').disabled = false;
+        document.getElementById('auth-cancel-btn').disabled = false;
+        showToast('Authentication required. Please verify via Discord.', 'warning');
+        return;
+      }
+
+      if (!data.ok && data.status !== 'connecting') {
+        showToast(data.error || 'Connection failed', 'error');
+        cancelConnection();
+        return;
+      }
+
+      // Success – wait for poll to catch up and switch to 'app'
+      showToast(`Connected to ${ip}`, 'success');
+      settingsCache.last_server = ip;
+      settingsCache.last_version = version;
+      await saveSettingsInternal();
+    } catch (e) {
+      showToast('Network error connecting', 'error');
+      cancelConnection();
+    }
+    setTimeout(poll, 500);
+  }
+
+  // ── Retry after auth ──────────────────────────────────────────────────
+  async function retryConnect() {
+    if (!pendingServer) {
+      showToast('No pending connection.', 'warning');
+      return;
+    }
+    const btn = document.getElementById('auth-retry-btn');
+    btn.disabled = true;
+    document.getElementById('auth-status').style.display = 'block';
+    document.getElementById('auth-status').textContent = 'Reconnecting…';
+
+    try {
+      const r = await fetch('/mc-connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server: pendingServer, version: pendingVersion })
+      });
+      const data = await r.json();
+
+      if (data.requires_auth === true) {
+        // Still not authenticated
+        document.getElementById('auth-status').textContent = '⚠️ Verification not completed yet. Please complete the Discord verification and try again.';
+        btn.disabled = false;
+        showToast('Authentication still required.', 'warning');
+        return;
+      }
+
+      if (!data.ok && data.status !== 'connecting') {
+        document.getElementById('auth-status').textContent = '❌ Error: ' + (data.error || 'Unknown');
+        btn.disabled = false;
+        showToast(data.error || 'Connection failed', 'error');
+        return;
+      }
+
+      // Success – close overlay and wait for poll to transition to app
+      document.getElementById('auth-overlay').classList.remove('open');
+      showToast('Authentication successful! Connecting…', 'success');
+      settingsCache.last_server = pendingServer;
+      settingsCache.last_version = pendingVersion;
+      await saveSettingsInternal();
+      pendingServer = null;
+    } catch (e) {
+      document.getElementById('auth-status').textContent = '❌ Network error: ' + e.message;
+      btn.disabled = false;
+      showToast('Network error reconnecting', 'error');
+    }
+    setTimeout(poll, 500);
+  }
+
+  async function cancelConnection() {
+    document.getElementById('auth-overlay').classList.remove('open');
+    try {
+      await fetch('/mc-logout', { method: 'POST' });
+      showToast('Connection cancelled.', 'info');
+    } catch (e) {
+      showToast('Error cancelling connection', 'error');
+    }
+    clientView = 'account';
+    renderClientView();
+    setTimeout(poll, 500);
+  }
+
+  // ── Connecting animation ─────────────────────────────────────────────
+  const CONN_STEPS = ['resolve', 'auth', 'login', 'world', 'done'];
+
+  function runConnectingSequence() {
+    const bar = document.getElementById('conn-progress-bar');
+    document.querySelectorAll('.conn-step').forEach(el => {
+      el.classList.remove('active', 'done');
+      el.querySelector('.mark').textContent = '○';
+    });
+    let i = 0;
+    const advance = () => {
+      if (i > 0) {
+        const prev = document.querySelector(`.conn-step[data-step="${CONN_STEPS[i - 1]}"]`);
+        prev.classList.remove('active');
+        prev.classList.add('done');
+        prev.querySelector('.mark').textContent = '✓';
+      }
+      if (i >= CONN_STEPS.length) {
+        bar.style.width = '100%';
+        return;
+      }
+      const step = document.querySelector(`.conn-step[data-step="${CONN_STEPS[i]}"]`);
+      step.classList.add('active');
+      step.querySelector('.mark').textContent = '●';
+      bar.style.width = `${Math.round((i / CONN_STEPS.length) * 100)}%`;
+      i++;
+      setTimeout(advance, 650);
+    };
+    advance();
+  }
+
+  // ── App navigation ────────────────────────────────────────────────────
+  function switchPage(page) {
+    document.querySelectorAll('.nav-item[data-page]').forEach(el => {
+      el.classList.toggle('active', el.dataset.page === page);
+    });
+    document.querySelectorAll('.shell-page').forEach(el => {
+      el.classList.toggle('active', el.dataset.page === page);
+    });
+    if (page === 'autocommands') loadAutoCommands();
+    if (page === 'settings') loadSettings();
+    if (page === 'plan') loadPlanUsage();
+  }
+
+  async function loadPlanUsage() {
+    try {
+      const r = await fetch('/mc-usage');
+      const data = await r.json();
+      if (!data.ok) return;
+
+      document.getElementById('plan-current').textContent = data.plan_label + ' plan';
+
+      document.getElementById('plan-cmd-text').textContent = `${data.commands_used} / ${data.commands_limit}`;
+      const cmdPct = data.commands_limit ? Math.min(100, Math.round(data.commands_used / data.commands_limit * 100)) : 0;
+      document.getElementById('plan-cmd-bar').style.width = cmdPct + '%';
+
+      document.getElementById('plan-auto-text').textContent = `${data.auto_active} / ${data.auto_limit}`;
+      const autoPct = data.auto_limit ? Math.min(100, Math.round(data.auto_active / data.auto_limit * 100)) : 0;
+      document.getElementById('plan-auto-bar').style.width = autoPct + '%';
+
+      const freeTag = document.getElementById('plan-free-tag');
+      if (freeTag) freeTag.textContent = data.plan === 'free' ? '✓ Your current plan' : `On ${data.plan_label}`;
+    } catch (e) {
+      console.error('Failed to load plan usage', e);
+    }
+  }
+
+  async function disconnectServer() {
+    stopShellConsolePolling();
+    try {
+      await fetch('/mc-logout', { method: 'POST' });
+      showToast('Disconnected from server.', 'info');
+    } catch (e) {
+      showToast('Error disconnecting', 'error');
+    }
+    setTimeout(poll, 500);
+  }
+
+  // ── Console ──────────────────────────────────────────────────────────
+  function startShellConsolePolling() {
+    if (shellConsoleTimer) return;
+    pollShellConsole();
+    shellConsoleTimer = setInterval(pollShellConsole, 2000);
+  }
+
+  function stopShellConsolePolling() {
+    if (shellConsoleTimer) {
+      clearInterval(shellConsoleTimer);
+      shellConsoleTimer = null;
+    }
+  }
+
+  async function pollShellConsole() {
+    try {
+      const r = await fetch(`/mc-chat?after=${shellConsoleAfterId}`);
+      const data = await r.json();
+      if (data.ok && data.messages) {
+        appendShellConsoleLines(data.messages);
+        if (data.messages.length > 0) {
+          shellConsoleAfterId = data.messages[data.messages.length - 1].id;
+        }
+      }
+    } catch (e) {}
+  }
+
+  function appendShellConsoleLines(messages) {
+    const log = document.getElementById('shell-console-log');
+    if (!log) return;
+    const empty = log.querySelector('.empty');
+    if (empty) empty.remove();
+    
+    messages.forEach(msg => {
+      const div = document.createElement('div');
+      div.className = `line ${msg.type || 'game'}`;
+      const ts = new Date().toLocaleTimeString();
+      div.innerHTML = `<span class="ts">[${ts}]</span>${escapeHtml(msg.text)}`;
+      log.appendChild(div);
+    });
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function sendShellConsole() {
+    const input = document.getElementById('shell-console-input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    
+    appendShellConsoleLines([{ type: 'sent', text: `> ${text}` }]);
+    
+    try {
+      await fetch('/mc-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+    } catch (e) {
+      showToast('Failed to send', 'error');
+    }
+  }
+
+  // ── Dashboard live stats ────────────────────────────────────────────────
+  function fmtNum(v, digits = 0) {
+    if (v === null || v === undefined || isNaN(v)) return '—';
+    return Number(v).toFixed(digits);
+  }
+
+  function fmtOnlineTime(ms) {
+    if (!ms || ms < 0) return '—';
+    const totalSec = Math.floor(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  const CONN_LABELS = {
+    ready: 'Connected',
+    connecting: 'Connecting…',
+    awaiting_auth: 'Waiting for Microsoft login…',
+    awaiting_discord_auth: 'Waiting for Discord auth…',
+    disconnected: 'Disconnected',
+    error: 'Error',
+  };
+  const CONN_COLORS = {
+    ready: 'var(--ok)',
+    connecting: '#60A5FA',
+    awaiting_auth: 'var(--warn)',
+    awaiting_discord_auth: '#C084FC',
+    disconnected: 'var(--text-faint)',
+    error: 'var(--danger)',
+  };
+
+  function setBar(barId, textId, value, max, fmt) {
+    const bar = document.getElementById(barId);
+    const text = document.getElementById(textId);
+    const hasValue = value !== null && value !== undefined && !isNaN(value);
+    const hasMax = max !== null && max !== undefined && !isNaN(max) && max > 0;
+    if (bar) bar.style.width = (hasValue && hasMax) ? `${Math.max(0, Math.min(100, (value / max) * 100))}%` : '0%';
+    if (text) text.textContent = hasValue ? (fmt ? fmt(value, max) : (hasMax ? `${fmtNum(value)} / ${fmtNum(max)}` : fmtNum(value))) : '—';
+  }
+
+  function renderDashboard(s) {
+    const status = s.status || 'disconnected';
+    const connected = status === 'ready';
+
+    const username = s.mcUsername || s.username || null;
+    const avatar = document.getElementById('dash-avatar');
+    if (avatar) avatar.src = `https://minotar.net/avatar/${encodeURIComponent(username || 'MHF_Steve')}/100`;
+    const usernameEl = document.getElementById('dash-username');
+    if (usernameEl) usernameEl.textContent = username || '—';
+
+    const dot = document.getElementById('dash-conn-dot');
+    const connText = document.getElementById('dash-conn-status');
+    if (dot) dot.style.background = CONN_COLORS[status] || CONN_COLORS.disconnected;
+    if (connText) connText.textContent = CONN_LABELS[status] || 'Disconnected';
+
+    const serverEl = document.getElementById('dash-server');
+    if (serverEl) serverEl.textContent = s.server || s.ip || '—';
+    const pingEl = document.getElementById('dash-ping');
+    if (pingEl) pingEl.textContent = (s.ping !== undefined && s.ping !== null) ? fmtNum(s.ping) : '—';
+
+    const coordsEl = document.getElementById('dash-coords');
+    if (coordsEl) {
+      const c = s.coords || s.position;
+      coordsEl.textContent = (connected && c && c.x !== undefined)
+        ? `${fmtNum(c.x, 1)}, ${fmtNum(c.y, 1)}, ${fmtNum(c.z, 1)}`
+        : '—';
+    }
+
+    const tpsEl = document.getElementById('dash-tps');
+    if (tpsEl) tpsEl.textContent = (s.tps !== undefined && s.tps !== null) ? fmtNum(s.tps, 1) : '—';
+
+    const onlineEl = document.getElementById('dash-online');
+    if (onlineEl) onlineEl.textContent = connected ? fmtOnlineTime(s.onlineTimeMs || s.onlineTime || 0) : '—';
+
+    setBar('dash-health-bar', 'dash-health-text', s.health, s.maxHealth ?? 20);
+    setBar('dash-hunger-bar', 'dash-hunger-text', s.hunger ?? s.food, s.maxHunger ?? 20);
+
+    const armorEl = document.getElementById('dash-armor');
+    if (armorEl) armorEl.textContent = (s.armor !== undefined && s.armor !== null) ? fmtNum(s.armor) : '—';
+
+    setBar('dash-xp-bar', 'dash-xp-text', s.xpLevel, null, (v) => `Level ${fmtNum(v)}`);
+    const xpBar = document.getElementById('dash-xp-bar');
+    if (xpBar && s.xpProgress !== undefined && s.xpProgress !== null) {
+      xpBar.style.width = `${Math.max(0, Math.min(100, s.xpProgress * 100))}%`;
+    }
+  }
+
+  function renderServerPage(s) {
+    const status = s.status || 'disconnected';
+    const connected = status === 'ready';
+
+    const ipEl = document.getElementById('srv-ip');
+    if (ipEl) ipEl.textContent = s.server || s.ip || '—';
+
+    const versionEl = document.getElementById('srv-version');
+    if (versionEl) versionEl.textContent = s.version || '—';
+
+    const pingEl = document.getElementById('srv-ping');
+    if (pingEl) pingEl.textContent = (connected && s.ping !== undefined && s.ping !== null) ? `${fmtNum(s.ping)} ms` : '—';
+
+    const statusDot = document.getElementById('srv-status-dot');
+    const statusText = document.getElementById('srv-status-text');
+    if (statusDot) statusDot.style.background = CONN_COLORS[status] || CONN_COLORS.disconnected;
+    if (statusText) statusText.textContent = CONN_LABELS[status] || 'Disconnected';
+
+    const reconnectBtn = document.getElementById('srv-reconnect');
+    const disconnectBtn = document.getElementById('srv-disconnect');
+    const joinBtn = document.getElementById('srv-join');
+    if (reconnectBtn) reconnectBtn.disabled = status === 'connecting';
+    if (disconnectBtn) disconnectBtn.disabled = !connected;
+    if (joinBtn) joinBtn.textContent = connected ? '🌐 Join a Different Server' : '🌐 Join Server';
+  }
+
+  async function serverReconnect() {
+    const btn = document.getElementById('srv-reconnect');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/mc-reconnect', { method: 'POST' });
+      const data = await r.json();
+      if (data.ok === false) {
+        showToast(data.error || 'Reconnect failed', 'error');
       } else {
-        document.getElementById('schedule-list').innerHTML = 
-          '<div class="schedule-empty">⚠️ ' + (data.error || 'Failed to load') + '</div>'
+        showToast('Reconnecting…', 'info');
       }
     } catch (e) {
-      document.getElementById('schedule-list').innerHTML = 
-        '<div class="schedule-empty">⚠️ Failed to load schedule</div>'
+      showToast('Network error reconnecting', 'error');
+    } finally {
+      setTimeout(poll, 500);
     }
   }
 
-  function renderSchedule(commands) {
-    const container = document.getElementById('schedule-list')
-    if (!commands || !commands.length) {
-      container.innerHTML = '<div class="schedule-empty">No scheduled commands.</div>'
-      return
+  async function serverDisconnect() {
+    const btn = document.getElementById('srv-disconnect');
+    if (btn) btn.disabled = true;
+    stopShellConsolePolling();
+    try {
+      const r = await fetch('/mc-logout', { method: 'POST' });
+      const data = await r.json();
+      if (data.ok === false) {
+        showToast(data.error || 'Disconnect failed', 'error');
+      } else {
+        showToast('Disconnected from server.', 'info');
+      }
+    } catch (e) {
+      showToast('Network error disconnecting', 'error');
+    } finally {
+      setTimeout(poll, 500);
     }
-    container.innerHTML = commands.map(cmd => `
-      <div class="schedule-item">
-        <span class="cmd">${escapeHtml(cmd.command)}</span>
-        <span class="interval">every ${formatInterval(cmd.interval)}</span>
-        <button class="btn-sm" onclick="disableSchedule('${escapeHtml(cmd.command)}')">✕</button>
+  }
+
+  // ── Commands page ────────────────────────────────────────────────────
+  const QUICK_COMMANDS = ['/sethome', '/home', '/spawn', '/tpa ', '/msg ', '/who', '/list', '/warp '];
+  const RECENT_KEY = 'aura_recent_cmds';
+  const FAV_KEY = 'aura_fav_cmds';
+  const MAX_RECENT = 12;
+
+  function loadList(key) {
+    try { return JSON.parse(localStorage.getItem(key)) || []; } catch { return []; }
+  }
+  function saveList(key, list) {
+    localStorage.setItem(key, JSON.stringify(list));
+  }
+  function renderQuickCommands() {
+    const el = document.getElementById('quick-cmds');
+    if (!el) return;
+    el.innerHTML = QUICK_COMMANDS.map(c => `<button class="quick-cmd-btn" onclick="fillCommand('${c}')">${c}</button>`).join('');
+  }
+  function fillCommand(cmd) {
+    document.getElementById('cmd-input').value = cmd;
+    document.getElementById('cmd-input').focus();
+  }
+  async function executeCommand() {
+    const input = document.getElementById('cmd-input');
+    const cmd = input.value.trim();
+    if (!cmd) return;
+    input.value = '';
+    addRecentCommand(cmd);
+    
+    try {
+      const r = await fetch('/mc-run-command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd.replace(/^\//, '') })
+      });
+      const data = await r.json();
+      if (data.ok) {
+        showToast('Command executed.', 'success');
+      } else {
+        showToast(data.error || 'Command failed', 'error');
+      }
+    } catch (e) {
+      showToast('Network error', 'error');
+    }
+  }
+  function addRecentCommand(cmd) {
+    let recent = loadList(RECENT_KEY);
+    recent = recent.filter(c => c !== cmd);
+    recent.unshift(cmd);
+    if (recent.length > MAX_RECENT) recent.pop();
+    saveList(RECENT_KEY, recent);
+    renderRecentCommands();
+  }
+  function renderRecentCommands() {
+    const list = document.getElementById('recent-cmds-list');
+    if (!list) return;
+    const recent = loadList(RECENT_KEY);
+    if (recent.length === 0) {
+      list.innerHTML = '<div class="cmd-list-empty">No commands run yet.</div>';
+      return;
+    }
+    list.innerHTML = recent.map(c => `
+      <div class="cmd-list-item">
+        <span class="cmd">${escapeHtml(c)}</span>
+        <div class="cmd-btns">
+          <button onclick="fillCommand('${escapeHtml(c)}')">Use</button>
+          <button onclick="toggleFavorite('${escapeHtml(c)}')">⭐</button>
+        </div>
       </div>
-    `).join('')
+    `).join('');
+  }
+  function toggleFavorite(cmd) {
+    let fav = loadList(FAV_KEY);
+    if (fav.includes(cmd)) {
+      fav = fav.filter(c => c !== cmd);
+      showToast('Removed from favorites.', 'info');
+    } else {
+      fav.unshift(cmd);
+      showToast('Added to favorites.', 'success');
+    }
+    saveList(FAV_KEY, fav);
+    renderFavoriteCommands();
+  }
+  function renderFavoriteCommands() {
+    const list = document.getElementById('fav-cmds-list');
+    if (!list) return;
+    const fav = loadList(FAV_KEY);
+    if (fav.length === 0) {
+      list.innerHTML = '<div class="cmd-list-empty">No favorites yet. Star a recent command to add it.</div>';
+      return;
+    }
+    list.innerHTML = fav.map(c => `
+      <div class="cmd-list-item">
+        <span class="cmd">${escapeHtml(c)}</span>
+        <div class="cmd-btns">
+          <button onclick="fillCommand('${escapeHtml(c)}')">Use</button>
+          <button onclick="toggleFavorite('${escapeHtml(c)}')">🗑️</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // ── Auto Commands ────────────────────────────────────────────────────
+  async function loadAutoCommands() {
+    if (!currentDiscordId) return;
+    try {
+      const r = await fetch(`/mc-schedule/${currentDiscordId}`);
+      const data = await r.json();
+      if (data.ok) renderAutoCommands(data.commands || []);
+    } catch (e) {}
+  }
+  function renderAutoCommands(commands) {
+    const list = document.getElementById('auto-cmds-list');
+    if (!list) return;
+    if (commands.length === 0) {
+      list.innerHTML = '<div class="auto-list-empty">No scheduled commands yet.</div>';
+      return;
+    }
+    list.innerHTML = commands.map(c => `
+      <div class="auto-item">
+        <span class="cmd">${escapeHtml(c.command)}</span>
+        <span class="interval-tag">Every ${formatInterval(c.interval)}</span>
+        <div class="toggle ${c.enabled ? 'on' : ''}" onclick="toggleAutoCommand('${escapeHtml(c.command)}', ${c.enabled})">
+          <div class="knob"></div>
+        </div>
+        <button class="del-btn" onclick="deleteAutoCommand('${escapeHtml(c.command)}')">Delete</button>
+      </div>
+    `).join('');
+  }
+  async function toggleAutoCommand(command, currentlyEnabled) {
+    if (currentlyEnabled) {
+      await fetch(`/mc-schedule/disable/${currentDiscordId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      });
+      showToast('Command disabled.', 'info');
+    } else {
+      showToast('Re-add the command to enable it.', 'info');
+    }
+    loadAutoCommands();
+  }
+  async function deleteAutoCommand(command) {
+    try {
+      await fetch(`/mc-schedule/delete/${currentDiscordId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      });
+      showToast('Command deleted.', 'success');
+      loadAutoCommands();
+    } catch (e) {
+      showToast('Failed to delete', 'error');
+    }
+  }
+  async function addAutoCommand() {
+    const cmd = document.getElementById('auto-cmd').value.trim();
+    const val = parseInt(document.getElementById('auto-interval-value').value);
+    const unit = document.getElementById('auto-interval-unit').value;
+    if (!cmd || isNaN(val) || val < 1) return showToast('Invalid command or interval', 'warning');
+    
+    const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    const intervalMs = val * mult[unit];
+    if (intervalMs < 60000) return showToast('Interval must be at least 1 minute', 'warning');
+
+    try {
+      const r = await fetch(`/mc-schedule/${currentDiscordId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd, interval: intervalMs })
+      });
+      const data = await r.json();
+      if (data.ok) {
+        document.getElementById('auto-cmd').value = '';
+        showToast('Auto command added!', 'success');
+        loadAutoCommands();
+      } else {
+        showToast(data.error || 'Failed to add', 'error');
+      }
+    } catch (e) {
+      showToast('Network error', 'error');
+    }
+  }
+
+  // ── Settings ─────────────────────────────────────────────────────────
+  async function loadSettings() {
+    try {
+      const r = await fetch('/api/settings');
+      const data = await r.json();
+      if (data.settings) {
+        settingsCache = data.settings;
+        applySettings();
+      }
+    } catch (e) {}
+  }
+  function applySettings() {
+    document.getElementById('setting-desktop-notif').checked = settingsCache.desktop_notifications || false;
+    document.getElementById('setting-conn-alerts').checked = settingsCache.connection_alerts || false;
+    document.getElementById('setting-error-notif').checked = settingsCache.error_notifications || false;
+    document.getElementById('setting-accent').value = settingsCache.accent_color || '#8B5CF6';
+    document.getElementById('setting-scale').value = settingsCache.ui_scale || 1;
+    document.getElementById('scale-label').textContent = settingsCache.ui_scale || 1;
+  }
+  async function saveSettingsInternal() {
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: settingsCache })
+      });
+    } catch (e) {}
+  }
+  async function saveSettings() {
+    settingsCache.desktop_notifications = document.getElementById('setting-desktop-notif').checked;
+    settingsCache.connection_alerts = document.getElementById('setting-conn-alerts').checked;
+    settingsCache.error_notifications = document.getElementById('setting-error-notif').checked;
+    settingsCache.accent_color = document.getElementById('setting-accent').value;
+    settingsCache.ui_scale = parseFloat(document.getElementById('setting-scale').value);
+    document.getElementById('scale-label').textContent = settingsCache.ui_scale;
+    
+    await saveSettingsInternal();
+    showToast('Settings saved!', 'success');
   }
 
   function formatInterval(ms) {
-    const mins = ms / 60000
-    if (mins >= 1440) return (mins/1440).toFixed(1) + 'd'
-    if (mins >= 60) return (mins/60).toFixed(1) + 'h'
-    return mins.toFixed(0) + 'm'
+    if (!ms) return '';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h`;
+    const d = Math.floor(h / 24);
+    return `${d}d`;
   }
 
   function escapeHtml(text) {
-    const div = document.createElement('div')
-    div.textContent = text
-    return div.innerHTML
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
-  async function addSchedule() {
-    const cmd = document.getElementById('schedule-cmd').value.trim()
-    const interval = document.getElementById('schedule-interval').value.trim()
-    if (!cmd || !interval) {
-      alert('Please enter both a command and interval.')
-      return
-    }
-    const intervalMs = parseInterval(interval)
-    if (!intervalMs || intervalMs < 60000) {
-      alert('Interval must be at least 60 seconds (e.g., 1m, 5m, 1h)')
-      return
-    }
-    try {
-      const r = await fetch('/mc-schedule/' + currentDiscordId, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command: cmd, interval: intervalMs})
-      })
-      const data = await r.json()
-      if (data.ok) {
-        document.getElementById('schedule-cmd').value = ''
-        document.getElementById('schedule-interval').value = ''
-        loadSchedule()
-      } else {
-        alert('Error: ' + (data.error || 'Unknown'))
+  // ── Polling loop ─────────────────────────────────────────────────────
+  async function poll() {
+    const status = await fetchStatus();
+    lastStatus = status;
+    applyStatus(status);
+  }
+
+  // ── Init ─────────────────────────────────────────────────────────────
+  window.onload = function() {
+    renderQuickCommands();
+    renderRecentCommands();
+    renderFavoriteCommands();
+    loadSettings();
+    poll();
+    setInterval(poll, 3000);
+    setInterval(() => {
+      if (document.querySelector('.shell-page[data-page="autocommands"]')?.classList.contains('active')) {
+        loadAutoCommands();
       }
-    } catch (e) {
-      alert('Error: ' + e.message)
-    }
-  }
-
-  function parseInterval(str) {
-    const match = str.match(/^(\d+)([smhd])$/i)
-    if (!match) return null
-    const val = parseInt(match[1])
-    const unit = match[2].toLowerCase()
-    const map = {s: 1000, m: 60000, h: 3600000, d: 86400000}
-    return val * (map[unit] || 0)
-  }
-
-  async function disableSchedule(command) {
-    if (!confirm(`Disable scheduled command: ${command}?`)) return
-    try {
-      const r = await fetch('/mc-schedule/disable/' + currentDiscordId, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command})
-      })
-      const data = await r.json()
-      if (data.ok) {
-        loadSchedule()
-      } else {
-        alert('Error: ' + (data.error || 'Unknown'))
-      }
-    } catch (e) {
-      alert('Error: ' + e.message)
-    }
-  }
-
-  // ── Live Console ────────────────────────────────────────────────────────────
-
-  let consoleAfterId = 0
-  let consoleTimer = null
-
-  function startConsolePolling() {
-    if (consoleTimer) return // already running
-    pollConsole()
-    consoleTimer = setInterval(pollConsole, 1500)
-  }
-
-  function stopConsolePolling() {
-    if (consoleTimer) { clearInterval(consoleTimer); consoleTimer = null }
-  }
-
-  async function pollConsole() {
-    try {
-      const r = await fetch('/mc-chat?after=' + consoleAfterId)
-      const data = await r.json()
-      if (data.ok) {
-        appendConsoleLines(data.messages || [])
-        if (typeof data.lastId === 'number') consoleAfterId = data.lastId
-      }
-    } catch (e) {
-      // Silent — the regular status poll will surface connectivity issues.
-    }
-  }
-
-  function appendConsoleLines(messages) {
-    if (!messages.length) return
-    const log = document.getElementById('console-log')
-    const empty = log.querySelector('.empty')
-    if (empty) empty.remove()
-    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30
-    for (const m of messages) {
-      const div = document.createElement('div')
-      div.className = 'line ' + (m.type || 'game')
-      const time = new Date(m.ts || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      div.innerHTML = `<span class="ts">${time}</span>${escapeHtml(m.text)}`
-      log.appendChild(div)
-    }
-    // Trim old lines client-side so the DOM doesn't grow unbounded
-    while (log.children.length > 300) log.removeChild(log.firstChild)
-    if (atBottom) log.scrollTop = log.scrollHeight
-  }
-
-  async function sendConsole() {
-    const input = document.getElementById('console-input')
-    const btn = document.getElementById('console-send')
-    const message = input.value.trim()
-    if (!message) return
-    btn.disabled = true
-    try {
-      const r = await fetch('/mc-chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message })
-      })
-      const data = await r.json()
-      if (data.ok) {
-        input.value = ''
-        pollConsole()
-      } else {
-        alert('Error: ' + (data.error || 'Failed to send'))
-      }
-    } catch (e) {
-      alert('Error: ' + e.message)
-    } finally {
-      btn.disabled = false
-      input.focus()
-    }
-  }
-
-  document.getElementById('console-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      sendConsole()
-    }
-  })
-
-  // ── Start polling ──────────────────────────────────────────────────────────
-
-  poll()
-  setInterval(poll, 3000)
+    }, 10000);
+    
+    // Hook up enter keys
+    document.getElementById('shell-console-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); sendShellConsole(); }
+    });
+    document.getElementById('cmd-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); executeCommand(); }
+    });
+  };
 </script>
 </body>
 </html>
-
-
